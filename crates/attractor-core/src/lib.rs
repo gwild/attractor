@@ -35,6 +35,8 @@
 pub mod sanitize;
 pub use sanitize::Sanitized;
 
+pub mod ingest;
+
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;
