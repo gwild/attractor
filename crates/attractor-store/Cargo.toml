@@ -1,0 +1,16 @@
+[package]
+name = "attractor-store"
+version = "0.0.0"
+edition = "2021"
+# -store floors its MSRV upward of core's 1.92 (asymmetric pin, #2233-thread).
+# It pulls petgraph and is Linux-container-only — NOT on the cross-platform
+# Windows attestation leg. Attested on Homer alone.
+rust-version = "1.96"
+license = "MIT OR Apache-2.0"
+description = "Content-addressed node store + acyclic DAG + tamper-evident provenance chain for the Attractor matrix. Linux-container-only layer above attractor-core."
+repository = "https://github.com/gwild/attractor"
+
+[dependencies]
+attractor-core = { path = "../attractor-core" }
+petgraph = "0.6"
+serde = { version = "1", features = ["derive"] }
