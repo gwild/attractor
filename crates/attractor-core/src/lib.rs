@@ -32,6 +32,9 @@
 //! formal canonical form), and the Ed25519 signing/`prev_hash` chain (a
 //! `-store`-layer concern, not core schema).
 
+pub mod sanitize;
+pub use sanitize::Sanitized;
+
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;
@@ -130,13 +133,57 @@ pub struct Cell {
     pub source: SourceRef,
 }
 
+/// Why a [`Cell`] can't be content-addressed.
+#[derive(Debug)]
+pub enum AddressError {
+    /// A non-finite float (NaN / ±Inf). `serde_json` encodes these as `null`,
+    /// which would collapse distinct values to one address — so we reject them
+    /// loudly instead of minting an ambiguous identity (#2215 review, Rebecca).
+    NonFiniteFloat,
+    /// Underlying JSON serialization failure.
+    Serde(serde_json::Error),
+}
+
+impl fmt::Display for AddressError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NonFiniteFloat => {
+                f.write_str("non-finite float (NaN/Inf) cannot be content-addressed")
+            }
+            Self::Serde(e) => write!(f, "serialization failed: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for AddressError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Serde(e) => Some(e),
+            Self::NonFiniteFloat => None,
+        }
+    }
+}
+
+impl From<serde_json::Error> for AddressError {
+    fn from(e: serde_json::Error) -> Self {
+        Self::Serde(e)
+    }
+}
+
 impl Cell {
     /// This cell's content address — its identity in the store.
     ///
     /// # Errors
-    /// Propagates serialization failure from [`content_address`].
-    pub fn address(&self) -> Result<ContentHash, serde_json::Error> {
-        content_address(self)
+    /// [`AddressError::NonFiniteFloat`] if the cell holds a NaN/Inf float
+    /// (would serialize to `null` and alias distinct values); otherwise
+    /// [`AddressError::Serde`] on serialization failure.
+    pub fn address(&self) -> Result<ContentHash, AddressError> {
+        if let Primitive::Float(f) = &self.value {
+            if !f.is_finite() {
+                return Err(AddressError::NonFiniteFloat);
+            }
+        }
+        Ok(content_address(self)?)
     }
 }
 
@@ -174,7 +221,9 @@ pub struct Edge {
 
 #[cfg(test)]
 mod tests {
-    use super::{content_address, Cell, ContentHash, Frame, Primitive, SourceRef};
+    use super::{
+        content_address, AddressError, Cell, ContentHash, Frame, Primitive, SourceRef,
+    };
     use std::collections::BTreeMap;
 
     fn sample_cell() -> Cell {
@@ -212,6 +261,24 @@ mod tests {
             sample_cell().address().unwrap(),
             other.address().unwrap()
         );
+    }
+
+    #[test]
+    fn cell_address_rejects_non_finite_float() {
+        // serde_json encodes NaN/Inf as `null` → distinct values would alias to
+        // one address. Reject loudly instead (#2215 review).
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let mut c = sample_cell();
+            c.value = Primitive::Float(bad);
+            assert!(matches!(c.address(), Err(AddressError::NonFiniteFloat)));
+        }
+    }
+
+    #[test]
+    fn cell_address_allows_finite_float() {
+        let mut c = sample_cell();
+        c.value = Primitive::Float(3.5);
+        assert!(c.address().is_ok());
     }
 
     #[test]
