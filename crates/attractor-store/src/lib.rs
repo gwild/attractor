@@ -29,7 +29,7 @@
 use std::collections::HashMap;
 use std::fmt;
 
-use attractor_core::{content_address, AddressError, Cell, ContentHash, Edge, Frame};
+use attractor_core::{content_address, AddressError, Cell, ContentHash, Edge, Frame, SourceRef};
 use petgraph::algo::is_cyclic_directed;
 use petgraph::graph::{DiGraph, NodeIndex};
 use serde::Serialize;
@@ -151,6 +151,7 @@ pub struct Store {
     index: HashMap<ContentHash, NodeIndex>,
     chain: Vec<ChainEntry>,
     head: Option<ContentHash>,
+    provenance: HashMap<ContentHash, Vec<SourceRef>>,
 }
 
 impl Store {
@@ -162,14 +163,27 @@ impl Store {
 
     /// Insert a node, returning its content address.
     ///
-    /// Idempotent: re-inserting identical content returns the same address
-    /// without duplicating the node or extending the provenance chain —
-    /// content-addressing dedups by construction.
+    /// The *node* dedups: re-inserting identical content returns the same
+    /// address without duplicating the node, the graph vertex, or the
+    /// provenance chain — content-addressing dedups by construction.
+    ///
+    /// *Provenance does not dedup.* Identity is value-only (#2249), so the same
+    /// value from a new source resolves to the existing address; its
+    /// [`SourceRef`] is still appended to that address's provenance multiset.
+    /// That repeat-insert-different-origin append is how #2220 redundancy
+    /// convergence records that a fact was observed again. Frames carry no
+    /// source and contribute nothing to provenance.
     ///
     /// # Errors
     /// [`StoreError::Address`] if the node cannot be content-addressed.
     pub fn insert(&mut self, node: Node) -> Result<ContentHash, StoreError> {
         let addr = node.address()?;
+        if let Node::Cell(cell) = &node {
+            self.provenance
+                .entry(addr)
+                .or_default()
+                .push(cell.source.clone());
+        }
         if self.nodes.contains_key(&addr) {
             return Ok(addr);
         }
@@ -267,6 +281,18 @@ impl Store {
         }
         prev == self.head
     }
+
+    /// The provenance multiset for `addr`: every [`SourceRef`] observed for this
+    /// value, in insertion order.
+    ///
+    /// Since identity is value-only, one address can carry many sources — the
+    /// same fact seen in `#general` and `#issues` yields two entries here while
+    /// remaining one node. Returns an empty slice for frames (no source) and for
+    /// addresses never inserted.
+    #[must_use]
+    pub fn provenance(&self, addr: &ContentHash) -> &[SourceRef] {
+        self.provenance.get(addr).map_or(&[], Vec::as_slice)
+    }
 }
 
 #[cfg(test)]
@@ -289,6 +315,16 @@ mod tests {
         Node::Frame(Frame {
             name: name.to_owned(),
             elements: BTreeMap::new(),
+        })
+    }
+
+    fn cell_from(text: &str, origin: &str) -> Node {
+        Node::Cell(Cell {
+            value: Primitive::Text(text.to_owned()),
+            source: SourceRef {
+                content_hash: ContentHash::of(origin.as_bytes()),
+                origin: origin.to_owned(),
+            },
         })
     }
 
@@ -409,5 +445,43 @@ mod tests {
             prev: Some(ContentHash::of(b"prev")),
         };
         assert_ne!(e.hash(), linked.hash());
+    }
+
+    #[test]
+    fn same_value_different_source_converges_to_one_node() {
+        // #2249/#2220: value-only identity means a fact from two channels is one
+        // node, with both sources accruing in the provenance multiset.
+        let mut s = Store::new();
+        let a = s.insert(cell_from("fact", "#general")).unwrap();
+        let b = s.insert(cell_from("fact", "#issues")).unwrap();
+        assert_eq!(a, b, "same value must converge regardless of origin");
+        assert_eq!(s.len(), 1);
+        assert_eq!(s.chain_len(), 1, "convergence must not extend the chain");
+        let origins: Vec<&str> = s.provenance(&a).iter().map(|sr| sr.origin.as_str()).collect();
+        assert_eq!(origins, ["#general", "#issues"]);
+    }
+
+    #[test]
+    fn provenance_is_a_multiset_counting_re_observation() {
+        // Identical value+source inserted twice → one node, but provenance
+        // records both observations (multiset, not set).
+        let mut s = Store::new();
+        let a = s.insert(cell_from("dup", "#general")).unwrap();
+        s.insert(cell_from("dup", "#general")).unwrap();
+        assert_eq!(s.len(), 1);
+        assert_eq!(s.provenance(&a).len(), 2);
+    }
+
+    #[test]
+    fn frames_have_no_provenance() {
+        let mut s = Store::new();
+        let f = s.insert(frame("structural")).unwrap();
+        assert!(s.provenance(&f).is_empty());
+    }
+
+    #[test]
+    fn provenance_empty_for_unknown_address() {
+        let s = Store::new();
+        assert!(s.provenance(&ContentHash::of(b"never")).is_empty());
     }
 }
