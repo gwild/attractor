@@ -1,0 +1,15 @@
+[package]
+name = "attractor-proto"
+version = "0.0.0"
+edition = "2021"
+# Lowest fleet Rust (Windy's Windows-native). Pure-serde wire contract — held
+# at the same 1.92 floor as attractor-core so it survives the cross-platform
+# attestation legs (Homer Linux 1.92 + Windows-native 1.92). No OS/async deps.
+rust-version = "1.92"
+license = "MIT OR Apache-2.0"
+description = "Portable wire types for the Attractor control plane: request/response envelope + transport. Pure serde, no OS/async/socket deps — cross-platform-attested with attractor-core; consumed by attractor-api (Linux server) and clients."
+repository = "https://github.com/gwild/attractor"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
