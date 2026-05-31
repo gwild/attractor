@@ -1,0 +1,7 @@
+# Attractor workspace. Members floor their own MSRV upward (asymmetric pin,
+# #2233-thread): attractor-core holds the lowest floor (1.92) on purpose so it
+# survives the cross-platform attestation legs; -store/-api (later) pull
+# tokio/axum/pyo3 and are Linux-container-only.
+[workspace]
+resolver = "2"
+members = ["crates/attractor-core"]

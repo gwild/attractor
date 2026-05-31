@@ -1,0 +1,16 @@
+[package]
+name = "attractor-core"
+version = "0.0.0"
+edition = "2021"
+# Lowest fleet Rust (Windy's Windows-native). The cross-platform attestation
+# legs (Homer `cargo +1.92`, Windows native 1.92) verify AT this floor — a pin
+# alone is informational and wouldn't catch own-code drift on a newer toolchain.
+rust-version = "1.92"
+license = "MIT OR Apache-2.0"
+description = "Pure schema + blake3 content-addressing for the Attractor matrix. No async/web/OS deps — the cross-platform-attested core layer."
+repository = "https://github.com/gwild/attractor"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+blake3 = "1"
