@@ -32,6 +32,9 @@
 //! formal canonical form), and the Ed25519 signing/`prev_hash` chain (a
 //! `-store`-layer concern, not core schema).
 
+pub mod sanitize;
+pub use sanitize::Sanitized;
+
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;
