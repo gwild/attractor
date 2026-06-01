@@ -4,4 +4,4 @@
 # tokio/axum/pyo3 and are Linux-container-only.
 [workspace]
 resolver = "2"
-members = ["crates/attractor-core", "crates/attractor-proto", "crates/attractor-api", "crates/attractor-store"]
+members = ["crates/attractor-core", "crates/attractor-proto", "crates/attractor-api", "crates/attractor-store", "crates/attractor-io"]
