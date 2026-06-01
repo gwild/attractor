@@ -166,6 +166,11 @@ impl Store {
     /// without duplicating the node or extending the provenance chain —
     /// content-addressing dedups by construction.
     ///
+    /// First-writer-wins on provenance: when a re-inserted Cell carries a
+    /// different `source` than the stored copy, the later source is dropped
+    /// here. The authoritative source multiset lives in the provenance index
+    /// (follow-up), not on the stored Node.
+    ///
     /// # Errors
     /// [`StoreError::Address`] if the node cannot be content-addressed.
     pub fn insert(&mut self, node: Node) -> Result<ContentHash, StoreError> {
