@@ -1,0 +1,22 @@
+[package]
+name = "attractor-api"
+version = "0.0.0"
+edition = "2021"
+# Holds the 1.92 floor (depends only on the portable attractor-proto + serde),
+# so the Homer Linux-1.92 leg attests it. std-only — no tokio/axum; the control
+# protocol is a JSON-lines request/response, faithful to stringdriver's
+# `terminal_api`/`sdctl`. Unix-socket transport is `#[cfg(unix)]`; TCP is the
+# portable path, so the crate compiles on Windows though the daemon runs on Homer.
+rust-version = "1.92"
+license = "MIT OR Apache-2.0"
+description = "Control server + `atctl` client for the Attractor matrix daemon: JSON-lines request/response over a Unix socket (local) + TCP (remote). Std-only; speaks attractor-proto."
+repository = "https://github.com/gwild/attractor"
+
+[dependencies]
+attractor-proto = { path = "../attractor-proto" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[[bin]]
+name = "atctl"
+path = "src/bin/atctl.rs"
