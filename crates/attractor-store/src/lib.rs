@@ -32,6 +32,8 @@ use std::fmt;
 use attractor_core::{content_address, AddressError, Cell, ContentHash, Edge, Frame, SourceRef};
 use petgraph::algo::is_cyclic_directed;
 use petgraph::graph::{DiGraph, NodeIndex};
+use petgraph::visit::{Bfs, Reversed};
+use petgraph::Direction;
 use serde::Serialize;
 
 /// An addressable node in the matrix: either a leaf [`Cell`] or a [`Frame`]
@@ -293,6 +295,71 @@ impl Store {
     pub fn provenance(&self, addr: &ContentHash) -> &[SourceRef] {
         self.provenance.get(addr).map_or(&[], Vec::as_slice)
     }
+
+    /// Every node reachable *from* `addr` by following edges forward (its
+    /// transitive successors), excluding `addr` itself.
+    ///
+    /// Edge `kind` is not interpreted — direction alone defines reachability. For
+    /// a `decomposes` goal→subtask convention this is the subtree under a goal;
+    /// the caller assigns the semantics. Empty for an unknown or sink address.
+    #[must_use]
+    pub fn descendants(&self, addr: &ContentHash) -> Vec<ContentHash> {
+        let Some(&start) = self.index.get(addr) else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        let mut bfs = Bfs::new(&self.graph, start);
+        while let Some(nx) = bfs.next(&self.graph) {
+            if nx != start {
+                out.push(self.graph[nx]);
+            }
+        }
+        out
+    }
+
+    /// Every node that can reach `addr` by following edges forward (its
+    /// transitive predecessors), excluding `addr` itself.
+    ///
+    /// Walks the graph reversed. For a `decomposes` goal→subtask convention this
+    /// is the path from a task up toward its root goal(s) — the "eyes on the
+    /// prize" lineage. Empty for an unknown or source address.
+    #[must_use]
+    pub fn ancestors(&self, addr: &ContentHash) -> Vec<ContentHash> {
+        let Some(&start) = self.index.get(addr) else {
+            return Vec::new();
+        };
+        let reversed = Reversed(&self.graph);
+        let mut out = Vec::new();
+        let mut bfs = Bfs::new(reversed, start);
+        while let Some(nx) = bfs.next(reversed) {
+            if nx != start {
+                out.push(self.graph[nx]);
+            }
+        }
+        out
+    }
+
+    /// Addresses with no incoming edges — the top of the DAG (e.g. root goals
+    /// nothing else decomposes into). A store with no edges returns all nodes.
+    #[must_use]
+    pub fn roots(&self) -> Vec<ContentHash> {
+        self.boundary(Direction::Incoming)
+    }
+
+    /// Addresses with no outgoing edges — the bottom of the DAG (e.g. atomic
+    /// tasks/notes that decompose into nothing further).
+    #[must_use]
+    pub fn leaves(&self) -> Vec<ContentHash> {
+        self.boundary(Direction::Outgoing)
+    }
+
+    fn boundary(&self, dir: Direction) -> Vec<ContentHash> {
+        self.graph
+            .node_indices()
+            .filter(|&n| self.graph.neighbors_directed(n, dir).next().is_none())
+            .map(|n| self.graph[n])
+            .collect()
+    }
 }
 
 #[cfg(test)]
@@ -483,5 +550,63 @@ mod tests {
     fn provenance_empty_for_unknown_address() {
         let s = Store::new();
         assert!(s.provenance(&ContentHash::of(b"never")).is_empty());
+    }
+
+    // Small goal tree: g decomposes into t1 and t2; t1 decomposes into t3.
+    //   g -> t1 -> t3
+    //   g -> t2
+    fn goal_tree() -> (Store, ContentHash, ContentHash, ContentHash, ContentHash) {
+        let mut s = Store::new();
+        let g = s.insert(frame("goal")).unwrap();
+        let t1 = s.insert(cell("t1")).unwrap();
+        let t2 = s.insert(cell("t2")).unwrap();
+        let t3 = s.insert(cell("t3")).unwrap();
+        s.link(g, t1, "decomposes").unwrap();
+        s.link(g, t2, "decomposes").unwrap();
+        s.link(t1, t3, "decomposes").unwrap();
+        (s, g, t1, t2, t3)
+    }
+
+    fn set(v: Vec<ContentHash>) -> std::collections::HashSet<ContentHash> {
+        v.into_iter().collect()
+    }
+
+    #[test]
+    fn descendants_collect_transitive_successors() {
+        let (s, g, t1, t2, t3) = goal_tree();
+        assert_eq!(set(s.descendants(&g)), set(vec![t1, t2, t3]));
+        assert_eq!(set(s.descendants(&t1)), set(vec![t3]));
+        assert!(s.descendants(&t3).is_empty(), "leaf has no descendants");
+    }
+
+    #[test]
+    fn ancestors_walk_up_toward_root_goal() {
+        let (s, g, t1, _t2, t3) = goal_tree();
+        assert_eq!(set(s.ancestors(&t3)), set(vec![t1, g]));
+        assert_eq!(set(s.ancestors(&t1)), set(vec![g]));
+        assert!(s.ancestors(&g).is_empty(), "root has no ancestors");
+    }
+
+    #[test]
+    fn roots_and_leaves_are_the_dag_boundary() {
+        let (s, g, _t1, t2, t3) = goal_tree();
+        assert_eq!(set(s.roots()), set(vec![g]));
+        assert_eq!(set(s.leaves()), set(vec![t2, t3]));
+    }
+
+    #[test]
+    fn isolated_nodes_are_both_root_and_leaf() {
+        let mut s = Store::new();
+        let a = s.insert(cell("lonely")).unwrap();
+        assert_eq!(s.roots(), vec![a]);
+        assert_eq!(s.leaves(), vec![a]);
+    }
+
+    #[test]
+    fn traversal_of_unknown_address_is_empty() {
+        let (s, ..) = goal_tree();
+        let unknown = ContentHash::of(b"not-in-store");
+        assert!(s.descendants(&unknown).is_empty());
+        assert!(s.ancestors(&unknown).is_empty());
     }
 }
