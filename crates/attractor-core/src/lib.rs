@@ -113,6 +113,12 @@ pub enum Primitive {
 
 /// Provenance: where a value came from, anchored to the source's content hash.
 ///
+/// **Non-identity metadata (#2249).** A `SourceRef` does NOT participate in a
+/// cell's content address — the same value from `#general` and `#issues` is
+/// *one* node, not two. `attractor-store` lifts provenance into a
+/// `node → multiset<SourceRef>` index (one fact, the set of places it came
+/// from), so origin can't fork the address and #2220 redundancy can converge.
+///
 /// The chain/signature fields from the #2213 model (`prev_hash`, Ed25519
 /// `signer`/`sig`) live in the `-store` layer; core keeps provenance to the
 /// content anchor plus a free-form origin label (e.g. a chat channel).
@@ -125,11 +131,16 @@ pub struct SourceRef {
 }
 
 /// The atomic unit of the matrix: a typed value plus its provenance.
+///
+/// **Identity is value-only (#2249):** [`Cell::address`] hashes `value`, *not*
+/// `source`. Two cells with equal `value` and different `source` share one
+/// address (convergence); `source` rides along as non-identity provenance that
+/// `attractor-store` indexes per address.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Cell {
-    /// The value this cell holds.
+    /// The value this cell holds — the addressable unit.
     pub value: Primitive,
-    /// Where the value came from.
+    /// Where the value came from. **Non-identity** — not part of the address.
     pub source: SourceRef,
 }
 
@@ -173,8 +184,13 @@ impl From<serde_json::Error> for AddressError {
 impl Cell {
     /// This cell's content address — its identity in the store.
     ///
+    /// **Value-only (#2249):** hashes `self.value`, not `self.source`. Equal
+    /// values address identically regardless of where they came from, so the
+    /// same fact from two channels converges to one node; provenance lives in
+    /// `attractor-store`'s `node → multiset<SourceRef>` index, not the address.
+    ///
     /// # Errors
-    /// [`AddressError::NonFiniteFloat`] if the cell holds a NaN/Inf float
+    /// [`AddressError::NonFiniteFloat`] if the value is a NaN/Inf float
     /// (would serialize to `null` and alias distinct values); otherwise
     /// [`AddressError::Serde`] on serialization failure.
     pub fn address(&self) -> Result<ContentHash, AddressError> {
@@ -183,7 +199,7 @@ impl Cell {
                 return Err(AddressError::NonFiniteFloat);
             }
         }
-        Ok(content_address(self)?)
+        Ok(content_address(&self.value)?)
     }
 }
 
@@ -261,6 +277,27 @@ mod tests {
             sample_cell().address().unwrap(),
             other.address().unwrap()
         );
+    }
+
+    #[test]
+    fn cell_address_is_value_only_ignores_source() {
+        // #2249: same value from different sources → ONE address (convergence).
+        let mut other = sample_cell();
+        other.source = SourceRef {
+            content_hash: ContentHash::of(b"different-payload"),
+            origin: "#issues".to_owned(),
+        };
+        assert_eq!(
+            sample_cell().address().unwrap(),
+            other.address().unwrap()
+        );
+    }
+
+    #[test]
+    fn cell_address_equals_bare_value_address() {
+        // The address IS the value's content address — source contributes nothing.
+        let c = sample_cell();
+        assert_eq!(c.address().unwrap(), content_address(&c.value).unwrap());
     }
 
     #[test]
