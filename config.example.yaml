@@ -1,0 +1,32 @@
+# Attractor shared config — ONE file, each crate reads its OWN section.
+#
+# This is the contract behind attractor-config: no crate hardcodes a path,
+# port, or endpoint. Copy to `config.yaml`, edit for your host, point crates at
+# it. Secrets do NOT live here — they go in `.env` (see .env.example) and are
+# read via attractor-config::secret, never committed.
+#
+# Paths are RELATIVE by convention and resolved against the config file's
+# directory via attractor-config::resolve_path — so moving the deploy doesn't
+# break anything and no machine-specific absolutes leak into the repo.
+
+# attractor-api (Ivy, #4) — control-plane endpoints.
+# Defaults live in attractor-proto (the pure wire contract); these OVERRIDE
+# them at the consumer, per the workspace rule (config at the consumer, not in
+# the pure crates).
+api:
+  socket_path: run/attractor.sock   # relative → resolve_path(base, ...)
+  tcp_addr: "127.0.0.1:7777"
+
+# attractor-store (Robby, #5) — DAG persistence.
+store:
+  data_dir: data/store              # relative → resolve_path
+  fsync: true
+
+# attractor-io (Windy) — shared-mem exporter (audmon /dev/shm pattern).
+io:
+  segment_name: attractor_matrix
+  segment_bytes: 67108864           # 64 MiB — no magic numbers in code
+
+# attractor-core ingest — embedding/source defaults (no secrets here).
+ingest:
+  channels: 64
