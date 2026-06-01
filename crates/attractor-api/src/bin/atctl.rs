@@ -78,7 +78,9 @@ fn send(request: &ApiRequest, tcp_addr: Option<&str>) -> std::io::Result<String>
 
 #[cfg(unix)]
 fn connect_local(line: &str) -> std::io::Result<String> {
-    let stream = std::os::unix::net::UnixStream::connect(SOCKET_PATH)?;
+    // Env-aware (ATTRACTOR_SOCKET_PATH) so client + daemon resolve the same
+    // path from config, not a hard-coded constant.
+    let stream = std::os::unix::net::UnixStream::connect(attractor_api::socket_path())?;
     exchange(stream, line)
 }
 

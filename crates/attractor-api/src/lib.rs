@@ -33,6 +33,38 @@ use serde::Serialize;
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, ToSocketAddrs};
 
+/// Environment variable overriding the local Unix-socket path.
+pub const ENV_SOCKET_PATH: &str = "ATTRACTOR_SOCKET_PATH";
+/// Environment variable overriding the TCP bind/connect address.
+pub const ENV_TCP_ADDR: &str = "ATTRACTOR_TCP_ADDR";
+
+/// Resolve the control socket path from `$ATTRACTOR_SOCKET_PATH`, falling back
+/// to the proto default. Nothing is hard-coded at a call site — deployments
+/// point the daemon + client at the same path via env, no recompile.
+#[must_use]
+pub fn socket_path() -> String {
+    resolve(std::env::var(ENV_SOCKET_PATH).ok(), attractor_proto::SOCKET_PATH)
+}
+
+/// Resolve the TCP bind/connect address from `$ATTRACTOR_TCP_ADDR`, falling back
+/// to `0.0.0.0:<proto TCP_PORT>`.
+#[must_use]
+pub fn tcp_addr() -> String {
+    let default = format!("0.0.0.0:{}", attractor_proto::TCP_PORT);
+    resolve(std::env::var(ENV_TCP_ADDR).ok(), &default)
+}
+
+/// Pure resolver: a non-empty override wins, otherwise the default. Split out
+/// from the env read so it's testable without mutating process-global env
+/// (which would race other tests).
+#[must_use]
+fn resolve(override_val: Option<String>, default: &str) -> String {
+    match override_val {
+        Some(v) if !v.trim().is_empty() => v,
+        _ => default.to_owned(),
+    }
+}
+
 /// Payload for a [`RequestKind::Status`] reply (the server decides this shape,
 /// per the proto's `data: Value` contract).
 #[derive(Debug, Clone, Serialize)]
@@ -161,8 +193,19 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{dispatch, handle_line};
+    use super::{dispatch, handle_line, resolve};
     use attractor_proto::{ApiRequest, ApiResponse, RequestKind};
+
+    #[test]
+    fn resolve_prefers_nonempty_override() {
+        assert_eq!(resolve(Some("/custom.sock".into()), "/default.sock"), "/custom.sock");
+    }
+
+    #[test]
+    fn resolve_falls_back_when_absent_or_blank() {
+        assert_eq!(resolve(None, "/default.sock"), "/default.sock");
+        assert_eq!(resolve(Some("   ".into()), "/default.sock"), "/default.sock");
+    }
 
     #[test]
     fn dispatch_ping_is_ok_empty() {
