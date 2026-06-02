@@ -1,0 +1,17 @@
+[package]
+name = "attractor-config"
+version = "0.0.0"
+edition = "2021"
+# Cross-platform floor (#2233): config loading is pure + portable, attested on
+# both the Homer-1.92 and Windows-native-1.92 legs — no OS-gated deps here.
+rust-version = "1.92"
+license = "MIT OR Apache-2.0"
+description = "Shared config.yaml + .env loader for the Attractor crates: generic typed load, required-secret access, relative-path resolution, fail-loud (no silent defaults). So no crate hardcodes paths/ports/secrets."
+repository = "https://github.com/gwild/attractor"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+# Fleet-standard YAML (audmon uses serde_yaml 0.9). NOTE: serde_yaml is in
+# maintenance-only; if cargo-deny/advisory flags it, the drop-in swap is
+# `serde_yml`. Pure Rust, no OS deps — should attest clean on both 1.92 legs.
+serde_yaml = "0.9"
