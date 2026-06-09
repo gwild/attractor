@@ -9,7 +9,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-HOST="$(hostname -s 2>/dev/null || hostname)"
+HOST="$(hostname -s)"
 TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 COMMIT="$(git -C "$REPO_ROOT" rev-parse --short HEAD)"
 
