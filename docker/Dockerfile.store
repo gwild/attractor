@@ -1,0 +1,19 @@
+# Pinned Rust 1.96 build/test sandbox for Linux-container-only crates
+# (attractor-store). Portable legs stay on Dockerfile (1.92).
+FROM rust:1.96-slim-bookworm
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        pkg-config \
+        build-essential \
+        ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN useradd --uid 1000 --create-home --shell /bin/bash app
+
+ENV CARGO_HOME=/home/app/.cargo
+RUN mkdir -p /home/app/.cargo/registry /home/app/.cargo/git && chown -R app:app /home/app/.cargo
+
+WORKDIR /work
+USER app
+
+CMD ["rustc", "--version"]
