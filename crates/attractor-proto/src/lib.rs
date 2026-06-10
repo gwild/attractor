@@ -173,6 +173,51 @@ impl ApiRequest {
     }
 }
 
+/// WS-1 store/API freeze: response payload for [`RequestKind::Get`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GetData {
+    /// Content address of the node.
+    pub address: ContentHashHex,
+    /// Stored node value (core `Cell` or `Frame` JSON).
+    pub node: serde_json::Value,
+    /// Provenance multiset for this address.
+    pub provenance_refs: Vec<ProvenanceRef>,
+    /// Portable receipt for WS-3 acceptance rows (#13 contract).
+    pub receipt: E2eReceipt,
+}
+
+/// Response payload for [`RequestKind::Insert`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct InsertData {
+    /// Content address assigned by the store.
+    pub address: ContentHashHex,
+}
+
+/// Response payload for [`RequestKind::Link`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LinkData {
+    /// Edge source address.
+    pub from: ContentHashHex,
+    /// Edge destination address.
+    pub to: ContentHashHex,
+    /// Typed edge label.
+    pub kind: String,
+}
+
+/// Response payload for [`RequestKind::Snapshot`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SnapshotData {
+    /// Distinct nodes stored.
+    pub node_count: usize,
+    /// Provenance chain length.
+    pub chain_len: usize,
+    /// Chain head digest, if any insertions occurred.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head: Option<ContentHashHex>,
+    /// Whether [`Store::verify_chain`] would pass.
+    pub chain_intact: bool,
+}
+
 /// Request verbs. v0 ships only the universal verbs; domain/matrix ops are
 /// added by the `attractor-api`/`attractor-store` owners — hence
 /// `#[non_exhaustive]`, so adding a variant is not a breaking change here.
@@ -184,6 +229,27 @@ pub enum RequestKind {
     Ping,
     /// Service status snapshot. Payload shape is defined by the server.
     Status,
+    /// Fetch a stored node and its provenance receipt by content address.
+    Get {
+        /// Node content address to load.
+        address: ContentHashHex,
+    },
+    /// Insert a core node (`Cell` or `Frame` JSON) into the store.
+    Insert {
+        /// Serialized core node (`Cell` or tagged frame object).
+        node: serde_json::Value,
+    },
+    /// Add a typed edge between two stored nodes.
+    Link {
+        /// Edge source address.
+        from: ContentHashHex,
+        /// Edge destination address.
+        to: ContentHashHex,
+        /// Edge kind label.
+        kind: String,
+    },
+    /// Store integrity snapshot (counts + chain head).
+    Snapshot,
 }
 
 /// A control-plane response envelope, serde-tagged on `status`.
@@ -270,6 +336,17 @@ mod tests {
     fn verbs_tagged_by_op() {
         assert_eq!(serde_json::to_string(&RequestKind::Ping).unwrap(), r#"{"op":"ping"}"#);
         assert_eq!(serde_json::to_string(&RequestKind::Status).unwrap(), r#"{"op":"status"}"#);
+        assert_eq!(
+            serde_json::to_string(&RequestKind::Get {
+                address: hash(1),
+            })
+            .unwrap(),
+            r#"{"op":"get","address":"0000000000000000000000000000000000000000000000000000000000000001"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&RequestKind::Snapshot).unwrap(),
+            r#"{"op":"snapshot"}"#
+        );
     }
 
     #[test]

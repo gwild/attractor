@@ -58,6 +58,12 @@ impl ContentHash {
         &self.0
     }
 
+    /// Construct a content address from an existing 32-byte digest (not a hash-of-bytes).
+    #[must_use]
+    pub const fn from_digest(digest: [u8; 32]) -> Self {
+        Self(digest)
+    }
+
     /// Lowercase-hex rendering of the digest.
     #[must_use]
     pub fn to_hex(&self) -> String {
