@@ -8,12 +8,136 @@
 //!
 //! Adapted from stringdriver's `terminal_api` envelope shape (the reusable
 //! skeleton — its stepper/audio domain verbs are intentionally *not* carried
-//! over). v0 ships only the universal verbs (`Ping`, `Status`); the matrix-op
-//! verbs (`Get`/`Insert`/`Link`/`Snapshot`) map onto `attractor-store`'s API
-//! and are added there once it lands — so [`RequestKind`] is
-//! `#[non_exhaustive]` to admit them without breaking the envelope.
+//! over). v0 request/response traffic ships only the universal verbs (`Ping`,
+//! `Status`); the matrix-op verbs (`Get`/`Insert`/`Link`/`Snapshot`) map onto
+//! `attractor-store`'s API and are added there once it lands — so
+//! [`RequestKind`] is `#[non_exhaustive]` to admit them without breaking the
+//! envelope. The WS-1/WS-3 receipt structs below are passive payload contracts:
+//! portable serde shapes that higher crates can return or persist once their
+//! handlers land.
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
+use std::fmt;
+
+/// Portable content-hash representation on the wire.
+///
+/// Core owns the concrete `ContentHash` bytes; the protocol layer keeps the
+/// wire contract crate-independent by carrying the lowercase hex rendering.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[serde(transparent)]
+pub struct ContentHashHex(String);
+
+impl ContentHashHex {
+    /// Build a validated lowercase BLAKE3 content-hash hex string.
+    ///
+    /// # Errors
+    /// Returns [`HashHexError`] when `value` is not exactly 64 lowercase hex
+    /// characters.
+    pub fn new(value: impl Into<String>) -> Result<Self, HashHexError> {
+        let value = value.into();
+        if value.len() != 64 {
+            return Err(HashHexError::WrongLength { len: value.len() });
+        }
+        if let Some(bad) = value
+            .bytes()
+            .find(|&b| !matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+        {
+            return Err(HashHexError::InvalidByte { byte: bad });
+        }
+        Ok(Self(value))
+    }
+
+    /// Borrow the validated lowercase hex digest.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for ContentHashHex {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::new(value).map_err(serde::de::Error::custom)
+    }
+}
+
+/// Why a wire content hash was invalid.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HashHexError {
+    /// Digest was not 64 characters long.
+    WrongLength {
+        /// The supplied string length.
+        len: usize,
+    },
+    /// Digest included a byte outside `0-9a-f`.
+    InvalidByte {
+        /// The offending byte.
+        byte: u8,
+    },
+}
+
+impl fmt::Display for HashHexError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::WrongLength { len } => write!(f, "content hash hex length {len} != 64"),
+            Self::InvalidByte { byte } => {
+                write!(f, "content hash hex contains non-lowercase-hex byte 0x{byte:02x}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for HashHexError {}
+
+/// A span of source evidence that contributed to a derived graph receipt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceSpan {
+    /// Content hash of the source payload containing this span.
+    pub source_hash: ContentHashHex,
+    /// Byte offset where the cited source span begins.
+    pub start: u64,
+    /// Byte offset where the cited source span ends.
+    pub end: u64,
+    /// Optional human label for the span, such as a channel or transcript id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+}
+
+/// A source reference carried by an end-to-end receipt.
+///
+/// This mirrors the core `SourceRef` shape without depending on `attractor-core`
+/// from the portable protocol crate.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProvenanceRef {
+    /// Content address of the source payload.
+    pub content_hash: ContentHashHex,
+    /// Human/origin label; not part of graph identity.
+    pub origin: String,
+}
+
+/// End-to-end graph receipt for WS-1/WS-3 acceptance rows.
+///
+/// The receipt proves which graph address was produced, which source spans fed
+/// it, which transform produced it, and which provenance refs should be visible
+/// through store/API queries. It is a portable serde contract only; store/API
+/// persistence and query behavior live in higher crates.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct E2eReceipt {
+    /// Content address of the resulting graph/root frame.
+    pub graph_address: ContentHashHex,
+    /// Raw evidence spans that fed this derivation.
+    pub source_spans: Vec<SourceSpan>,
+    /// Stable transform identifier, for example `audmon.partials.v0`.
+    pub transform_id: String,
+    /// Optional confidence score from the transform.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<f64>,
+    /// Provenance refs expected to resolve from the store/API for this graph.
+    pub provenance_refs: Vec<ProvenanceRef>,
+}
 
 /// Default TCP port for the control plane — the portable transport.
 /// (`SD` → `7533` on a phone keypad, inherited from stringdriver.)
@@ -117,6 +241,10 @@ impl ApiResponse {
 mod tests {
     use super::*;
 
+    fn hash(seed: u8) -> ContentHashHex {
+        ContentHashHex::new(format!("{seed:064x}")).unwrap()
+    }
+
     #[test]
     fn request_round_trips() {
         let req = ApiRequest::new(RequestKind::Ping);
@@ -176,5 +304,68 @@ mod tests {
             let back: ApiResponse = serde_json::from_str(&json).unwrap();
             assert_eq!(r, back);
         }
+    }
+
+    #[test]
+    fn e2e_receipt_round_trips() {
+        let receipt = E2eReceipt {
+            graph_address: hash(1),
+            source_spans: vec![SourceSpan {
+                source_hash: hash(2),
+                start: 10,
+                end: 42,
+                label: Some("#attractor".to_owned()),
+            }],
+            transform_id: "audmon.partials.v0".to_owned(),
+            confidence: Some(0.875),
+            provenance_refs: vec![ProvenanceRef {
+                content_hash: hash(2),
+                origin: "#attractor".to_owned(),
+            }],
+        };
+        let json = serde_json::to_string(&receipt).unwrap();
+        let back: E2eReceipt = serde_json::from_str(&json).unwrap();
+        assert_eq!(receipt, back);
+    }
+
+    #[test]
+    fn optional_receipt_fields_are_omitted_when_absent() {
+        let receipt = E2eReceipt {
+            graph_address: hash(1),
+            source_spans: vec![SourceSpan {
+                source_hash: hash(2),
+                start: 0,
+                end: 4,
+                label: None,
+            }],
+            transform_id: "projector.v0".to_owned(),
+            confidence: None,
+            provenance_refs: Vec::new(),
+        };
+        let json = serde_json::to_value(&receipt).unwrap();
+        assert!(json.get("confidence").is_none());
+        assert!(json["source_spans"][0].get("label").is_none());
+    }
+
+    #[test]
+    fn content_hash_hex_rejects_bad_wire_values() {
+        assert!(matches!(
+            ContentHashHex::new("abc"),
+            Err(HashHexError::WrongLength { len: 3 })
+        ));
+        let bad = format!("{}G", "0".repeat(63));
+        assert!(matches!(
+            ContentHashHex::new(bad),
+            Err(HashHexError::InvalidByte { byte: b'G' })
+        ));
+    }
+
+    #[test]
+    fn content_hash_hex_deserialization_validates() {
+        let bad = serde_json::from_str::<ContentHashHex>(r#""ABC""#);
+        assert!(bad.is_err());
+        let good = serde_json::from_str::<ContentHashHex>(&format!(r#""{}""#, "a".repeat(64)))
+            .unwrap();
+        assert_eq!(good.as_str(), "a".repeat(64));
     }
 }
