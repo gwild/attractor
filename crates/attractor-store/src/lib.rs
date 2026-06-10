@@ -32,11 +32,11 @@ use std::fmt;
 use attractor_core::{content_address, AddressError, Cell, ContentHash, Edge, Frame, SourceRef};
 use petgraph::algo::is_cyclic_directed;
 use petgraph::graph::{DiGraph, NodeIndex};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// An addressable node in the matrix: either a leaf [`Cell`] or a [`Frame`]
 /// grouping. Edges relate nodes; nodes themselves carry the content.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Node {
     /// A leaf value with provenance.
     Cell(Cell),

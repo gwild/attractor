@@ -29,6 +29,6 @@ run_leg "portable-1.92" test \
   -p attractor-api \
   -p attractor-io
 
-run_leg "store-linux-1.96" --store test -p attractor-store
+run_leg "store-linux-1.96" --store test -p attractor-store -p attractor-api --features attractor-api/store
 
 echo "RECEIPT host=$HOST ts=$TS commit=$COMMIT legs=portable-1.92,store-linux-1.96 status=PASS"

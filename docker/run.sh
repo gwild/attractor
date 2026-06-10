@@ -25,7 +25,7 @@ fi
 if [[ "$USE_STORE" -eq 1 ]]; then
   IMAGE="attractor-build:1.96"
   DOCKERFILE="$SCRIPT_DIR/Dockerfile.store"
-  DEFAULT_ARGS=(test -p attractor-store)
+  DEFAULT_ARGS=(test -p attractor-store -p attractor-api --features attractor-api/store)
 else
   IMAGE="attractor-build:1.92"
   DOCKERFILE="$SCRIPT_DIR/Dockerfile"

@@ -2,18 +2,21 @@
 name = "attractor-api"
 version = "0.0.0"
 edition = "2021"
-# Holds the 1.92 floor (depends only on the portable attractor-proto + serde),
-# so the Homer Linux-1.92 leg attests it. std-only — no tokio/axum; the control
-# protocol is a JSON-lines request/response, faithful to stringdriver's
-# `terminal_api`/`sdctl`. Unix-socket transport is `#[cfg(unix)]`; TCP is the
-# portable path, so the crate compiles on Windows though the daemon runs on Homer.
+# Holds the 1.92 floor when built without `store`. With `store` enabled the crate
+# links `attractor-store` (MSRV 1.96) and is attested on the Linux-container leg.
 rust-version = "1.92"
 license = "MIT OR Apache-2.0"
 description = "Control server + `atctl` client for the Attractor matrix daemon: JSON-lines request/response over a Unix socket (local) + TCP (remote). Std-only; speaks attractor-proto."
 repository = "https://github.com/gwild/attractor"
 
+[features]
+# WS-1 store/API freeze: matrix verbs dispatch through an in-process store.
+store = ["dep:attractor-core", "dep:attractor-store"]
+
 [dependencies]
 attractor-proto = { path = "../attractor-proto" }
+attractor-core = { path = "../attractor-core", optional = true }
+attractor-store = { path = "../attractor-store", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
