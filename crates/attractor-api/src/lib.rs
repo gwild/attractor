@@ -245,7 +245,21 @@ where
     A: ToSocketAddrs,
     F: Fn() -> u64,
 {
-    let listener = TcpListener::bind(addr)?;
+    serve_tcp_on(TcpListener::bind(addr)?, uptime)
+}
+
+/// Serve the JSON-lines control protocol on an already-bound TCP listener.
+///
+/// Binding is the caller's job, so the bound address is observable before
+/// serving starts (e.g. bind port 0 in a test, read `local_addr`, then serve).
+///
+/// # Errors
+/// Currently never returns `Err`; the result mirrors [`serve_tcp`].
+#[cfg(not(feature = "store"))]
+pub fn serve_tcp_on<F>(listener: TcpListener, uptime: F) -> std::io::Result<()>
+where
+    F: Fn() -> u64,
+{
     for stream in listener.incoming() {
         match stream {
             Ok(s) => {
@@ -269,7 +283,22 @@ where
     A: ToSocketAddrs,
     F: Fn() -> u64,
 {
-    let listener = TcpListener::bind(addr)?;
+    serve_tcp_on(TcpListener::bind(addr)?, uptime)
+}
+
+/// Serve the JSON-lines control protocol on an already-bound TCP listener,
+/// with an in-process store.
+///
+/// Binding is the caller's job, so the bound address is observable before
+/// serving starts (e.g. bind port 0 in a test, read `local_addr`, then serve).
+///
+/// # Errors
+/// Currently never returns `Err`; the result mirrors [`serve_tcp`].
+#[cfg(feature = "store")]
+pub fn serve_tcp_on<F>(listener: TcpListener, uptime: F) -> std::io::Result<()>
+where
+    F: Fn() -> u64,
+{
     let mut store = Store::new();
     for stream in listener.incoming() {
         match stream {
@@ -299,7 +328,21 @@ where
     if path.exists() {
         std::fs::remove_file(path)?;
     }
-    let listener = UnixListener::bind(path)?;
+    serve_unix_on(UnixListener::bind(path)?, uptime)
+}
+
+/// Serve the control protocol on an already-bound Unix-domain listener.
+///
+/// Binding (and any stale-socket cleanup) is the caller's job; see
+/// [`serve_unix`] for the bind-by-path variant.
+///
+/// # Errors
+/// Currently never returns `Err`; the result mirrors [`serve_unix`].
+#[cfg(all(unix, not(feature = "store")))]
+pub fn serve_unix_on<F>(listener: std::os::unix::net::UnixListener, uptime: F) -> std::io::Result<()>
+where
+    F: Fn() -> u64,
+{
     for stream in listener.incoming() {
         match stream {
             Ok(s) => {
@@ -328,7 +371,22 @@ where
     if path.exists() {
         std::fs::remove_file(path)?;
     }
-    let listener = UnixListener::bind(path)?;
+    serve_unix_on(UnixListener::bind(path)?, uptime)
+}
+
+/// Serve the control protocol on an already-bound Unix-domain listener, with
+/// an in-process store.
+///
+/// Binding (and any stale-socket cleanup) is the caller's job; see
+/// [`serve_unix`] for the bind-by-path variant.
+///
+/// # Errors
+/// Currently never returns `Err`; the result mirrors [`serve_unix`].
+#[cfg(all(unix, feature = "store"))]
+pub fn serve_unix_on<F>(listener: std::os::unix::net::UnixListener, uptime: F) -> std::io::Result<()>
+where
+    F: Fn() -> u64,
+{
     let mut store = Store::new();
     for stream in listener.incoming() {
         match stream {
