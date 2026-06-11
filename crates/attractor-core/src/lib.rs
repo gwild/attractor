@@ -37,6 +37,9 @@ pub use sanitize::Sanitized;
 
 pub mod ingest;
 
+pub mod source_map;
+pub use source_map::{ByteRange, LineRange, MarkdownSourceSpan, SyntaxKind, TypedEvidence};
+
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;
