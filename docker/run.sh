@@ -6,7 +6,7 @@
 #
 # Default (portable leg, Rust 1.92): cargo test --workspace
 #   excluding attractor-store unless --store is passed.
-# With --store (Linux-container leg, Rust 1.96): cargo test -p attractor-store
+# With --store (Linux-container leg, Rust 1.96): cargo test store/API/projector.
 #
 # Examples:
 #   ./docker/run.sh test -p attractor-core
@@ -25,7 +25,13 @@ fi
 if [[ "$USE_STORE" -eq 1 ]]; then
   IMAGE="attractor-build:1.96"
   DOCKERFILE="$SCRIPT_DIR/Dockerfile.store"
-  DEFAULT_ARGS=(test -p attractor-store -p attractor-api --features attractor-api/store)
+  DEFAULT_ARGS=(
+    test
+    -p attractor-store
+    -p attractor-api
+    -p attractor-projector
+    --features attractor-api/store
+  )
 else
   IMAGE="attractor-build:1.92"
   DOCKERFILE="$SCRIPT_DIR/Dockerfile"

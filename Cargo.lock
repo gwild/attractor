@@ -54,6 +54,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "attractor-projector"
+version = "0.0.0"
+dependencies = [
+ "attractor-core",
+ "attractor-proto",
+ "attractor-store",
+ "serde_json",
+]
+
+[[package]]
 name = "attractor-proto"
 version = "0.0.0"
 dependencies = [

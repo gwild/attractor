@@ -10,9 +10,9 @@ it — the Rust core of the matrix project.
   model, `blake3` content hashing, `serde`. **No `tokio`/`axum`/`qdrant`/OS
   deps** — this is the layer that compiles and is attested cross-platform.
   MSRV pinned to the fleet's lowest Rust (`1.92`) on purpose.
-- **`attractor-store` / `attractor-api`** *(later)* — Merkle-DAG store
-  (`petgraph`), HTTP (`axum`), Python bridge (`pyo3`). Linux/Homer-container
-  only by design; floor higher than core.
+- **`attractor-store` / `attractor-api` / `attractor-projector`** — store,
+  control verbs, and WS-3 projection. These sit above the portable core and run
+  on the Linux/Homer container leg when they need store semantics.
 
 ## Cross-platform attestation (#2235 self-verify floor)
 

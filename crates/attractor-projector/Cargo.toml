@@ -1,0 +1,15 @@
+[package]
+name = "attractor-projector"
+version = "0.0.0"
+edition = "2021"
+# WS-3 sits above attractor-store and follows the Linux-container/store leg.
+rust-version = "1.96"
+license = "MIT OR Apache-2.0"
+description = "WS-3 markdown projector: typed promotion boundary that produces derived nodes and source-span receipts before store writes."
+repository = "https://github.com/gwild/attractor"
+
+[dependencies]
+attractor-core = { path = "../attractor-core" }
+attractor-proto = { path = "../attractor-proto" }
+attractor-store = { path = "../attractor-store" }
+serde_json = "1"
