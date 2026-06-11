@@ -27,10 +27,15 @@ Description=Attractor matrix daemon (docker)
 # Fail loud if the docker daemon is unreachable (replaces the unusable
 # system-unit dependency above).
 ExecStartPre=/usr/bin/docker version
-# Remove a stale container from an unclean stop. Quiet only for "not found";
-# a real removal failure of an existing container propagates and fails the
-# start (no `-` prefix — cleanup errors must not be swallowed).
-ExecStartPre=/bin/bash -c 'if /usr/bin/docker container inspect attractor >/dev/null 2>&1; then /usr/bin/docker rm -f attractor; fi'
+# Remove a stale container from an unclean stop. `docker inspect` exits 1
+# for BOTH container-absent and real errors (daemon, permissions), so only
+# stderr distinguishes them: the not-found case is matched explicitly and
+# is the ONLY quiet path; any other inspect failure is surfaced and fails
+# the start, as does a failed removal of an existing container.
+ExecStartPre=/bin/bash -c 'err=$(/usr/bin/docker container inspect attractor 2>&1 >/dev/null); rc=$?; \
+  if [ "$rc" -eq 0 ]; then exec /usr/bin/docker rm -f attractor; fi; \
+  case "$err" in *"No such container"*) exit 0;; \
+  *) printf "%%s\n" "$err" >&2; exit "$rc";; esac'
 ExecStart=/usr/bin/docker run --name attractor --rm --init \
     --user 1000:1000 \
     -v %h/attractor-run:/run/attractor \
