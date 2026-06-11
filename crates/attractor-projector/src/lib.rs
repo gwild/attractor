@@ -225,7 +225,7 @@ pub fn project_markdown_title_into_store(
             link.kind,
         )?;
     }
-    store.attach_receipt(graph_addr, projection.receipt.clone());
+    store.attach_receipt(graph_addr, projection.receipt.clone())?;
     Ok(projection.receipt)
 }
 
