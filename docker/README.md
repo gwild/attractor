@@ -28,6 +28,7 @@ projector trust boundary lands.
 | --- | --- | --- | --- |
 | `attractor-build:1.92` | `Dockerfile` | 1.92 | portable workspace members |
 | `attractor-build:1.96` | `Dockerfile.store` | 1.96 | `attractor-store` |
+| `attractor-run:latest` | `Dockerfile.run` | 1.96 build / slim runtime | `attractord` + `atctl`, store feature |
 
 Named volumes `attractor-cargo-registry` and `attractor-cargo-git` cache deps
 between runs.
@@ -36,3 +37,27 @@ between runs.
 
 `docker/attest.sh` is the Homer Linux Docker verification leg for #2288.
 Windows native attestation stays native (not this container).
+
+## Deploy (Homer, post-gate)
+
+`attractord` (in `attractor-api`) is the daemon: one transport per process —
+unix socket by default, `--tcp HOST:PORT` opt-in with an explicit address
+(never an implicit `0.0.0.0`). With the `store` feature each serving loop owns
+its in-process store, which is why one transport per process is enforced until
+a shared store lands.
+
+```bash
+docker build -f docker/Dockerfile.run -t attractor-run .
+mkdir -p ~/attractor-run ~/.config/systemd/user
+cp docker/attractor.service ~/.config/systemd/user/
+systemctl --user daemon-reload && systemctl --user enable --now attractor
+
+# Smoke test from the host:
+ATTRACTOR_SOCKET_PATH=~/attractor-run/attractor_api.sock atctl ping
+```
+
+Trust boundary: the socket dir (`~/attractor-run`) is the access-control
+surface — host filesystem permissions decide who can speak matrix verbs. No
+network listener exists unless an operator adds `--tcp` to the unit, which
+should ride its own reviewed change. Store state is memory-only today
+(restart clears it); persistence is future work.

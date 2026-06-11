@@ -1,0 +1,48 @@
+# attractor.service — Attractor daemon on Homer (user unit, #2288 deploy).
+#
+# Install (after building the image, see docker/README.md):
+#   mkdir -p ~/attractor-run ~/.config/systemd/user
+#   cp docker/attractor.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload && systemctl --user enable --now attractor
+#
+# Local agents connect via ATTRACTOR_SOCKET_PATH=%h/attractor-run/attractor_api.sock
+# (atctl picks it up from the environment). No TCP listener: the daemon is
+# unix-socket-only by default — enabling remote access is a deliberate edit
+# (add `--tcp 127.0.0.1:7533` plus a reviewed exposure plan), never a default.
+#
+# The in-process store is memory-only today; a restart clears matrix state.
+# Persistence (store.data_dir in config.example.yaml) is future work — do not
+# treat daemon state as durable until that lands.
+#
+# Why no Requires=docker.service: this is a USER unit; the user manager cannot
+# see system units, so a Requires/After on docker.service would be silently
+# ignored — exactly the kind of fail-soft RULES.md forbids. Instead the first
+# ExecStartPre fails loud when the docker daemon is unreachable, and
+# Restart/RestartSec retries cover the daemon-still-booting window.
+
+[Unit]
+Description=Attractor matrix daemon (docker)
+
+[Service]
+# Fail loud if the docker daemon is unreachable (replaces the unusable
+# system-unit dependency above).
+ExecStartPre=/usr/bin/docker version
+# Remove a stale container from an unclean stop. `docker inspect` exits 1
+# for BOTH container-absent and real errors (daemon, permissions), so only
+# stderr distinguishes them: the not-found case is matched explicitly and
+# is the ONLY quiet path; any other inspect failure is surfaced and fails
+# the start, as does a failed removal of an existing container.
+ExecStartPre=/bin/bash -c 'err=$(/usr/bin/docker container inspect attractor 2>&1 >/dev/null); rc=$?; \
+  if [ "$rc" -eq 0 ]; then exec /usr/bin/docker rm -f attractor; fi; \
+  case "$err" in *"No such container"*) exit 0;; \
+  *) printf "%%s\n" "$err" >&2; exit "$rc";; esac'
+ExecStart=/usr/bin/docker run --name attractor --rm --init \
+    --user 1000:1000 \
+    -v %h/attractor-run:/run/attractor \
+    attractor-run:latest
+ExecStop=/usr/bin/docker stop attractor
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
