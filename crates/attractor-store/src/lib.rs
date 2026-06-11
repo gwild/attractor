@@ -489,4 +489,93 @@ mod tests {
         let s = Store::new();
         assert!(s.provenance(&ContentHash::of(b"never")).is_empty());
     }
+
+    // Tamper-evidence negative paths. The chain's guarantee is that any
+    // mutation of recorded history is caught by `verify_chain` as long as the
+    // externally persisted head is honest — these tests mutate the private
+    // fields directly, standing in for a corrupted or hostile persistence
+    // layer underneath an honest head.
+
+    /// Three inserts, returning the store with chain entries to tamper with.
+    fn tampered_base() -> Store {
+        let mut s = Store::new();
+        s.insert(cell("a")).unwrap();
+        s.insert(cell("b")).unwrap();
+        s.insert(cell("c")).unwrap();
+        assert!(s.verify_chain(), "base chain must verify before tampering");
+        s
+    }
+
+    #[test]
+    fn tampered_middle_entry_node_is_detected() {
+        let mut s = tampered_base();
+        s.chain[1].node = ContentHash::of(b"forged");
+        assert!(!s.verify_chain(), "rewriting a middle entry's node must fail");
+    }
+
+    #[test]
+    fn tampered_last_entry_node_is_detected() {
+        // The last entry has no successor committing to it; only the head
+        // comparison catches this one.
+        let mut s = tampered_base();
+        s.chain[2].node = ContentHash::of(b"forged");
+        assert!(!s.verify_chain(), "rewriting the last entry's node must fail");
+    }
+
+    #[test]
+    fn tampered_prev_link_is_detected() {
+        let mut s = tampered_base();
+        s.chain[1].prev = Some(ContentHash::of(b"forged"));
+        assert!(!s.verify_chain(), "breaking a prev link must fail");
+    }
+
+    #[test]
+    fn truncated_chain_is_detected() {
+        let mut s = tampered_base();
+        s.chain.pop();
+        assert!(!s.verify_chain(), "dropping the last entry must fail against the head");
+    }
+
+    #[test]
+    fn reordered_entries_are_detected() {
+        let mut s = tampered_base();
+        s.chain.swap(0, 1);
+        assert!(!s.verify_chain(), "reordering history must fail");
+    }
+
+    #[test]
+    fn appended_forgery_with_stale_head_is_detected() {
+        // An attacker who can write the chain but not the persisted head:
+        // append an entry whose prev correctly commits to the real last entry.
+        let mut s = tampered_base();
+        let real_last = s.chain.last().unwrap().hash();
+        s.chain.push(ChainEntry {
+            node: ContentHash::of(b"forged"),
+            prev: Some(real_last),
+        });
+        assert!(!s.verify_chain(), "a well-linked appended entry must still fail the head check");
+    }
+
+    #[test]
+    fn forged_head_is_detected() {
+        let mut s = tampered_base();
+        s.head = Some(ContentHash::of(b"forged"));
+        assert!(!s.verify_chain(), "a head not matching the last entry must fail");
+    }
+
+    #[test]
+    fn nonempty_head_over_empty_chain_is_detected() {
+        let mut s = Store::new();
+        s.head = Some(ContentHash::of(b"forged"));
+        assert!(!s.verify_chain(), "a head with no chain behind it must fail");
+    }
+
+    #[test]
+    fn genesis_marker_tamper_is_detected() {
+        // Rewriting the genesis entry to claim a predecessor must fail even
+        // when every later link is internally consistent.
+        let mut s = tampered_base();
+        s.chain[0].prev = Some(ContentHash::of(b"pre-genesis"));
+        assert!(!s.verify_chain(), "genesis must have no predecessor");
+    }
 }
