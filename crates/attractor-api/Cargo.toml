@@ -23,3 +23,7 @@ serde_json = "1"
 [[bin]]
 name = "atctl"
 path = "src/bin/atctl.rs"
+
+[[bin]]
+name = "attractord"
+path = "src/bin/attractord.rs"

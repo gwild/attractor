@@ -1,0 +1,25 @@
+# Runtime image for the Attractor daemon on Homer (#2288 deploy leg).
+#
+# Build stage matches the store-leg sandbox (rust 1.96, bookworm) so the
+# binary that ships is built by the same pinned toolchain the #2288 gate
+# attests. Runtime stage is bare bookworm-slim, non-root.
+FROM rust:1.96-slim-bookworm AS build
+
+WORKDIR /src
+COPY . .
+RUN cargo build --release -p attractor-api --features store --bins
+
+FROM debian:bookworm-slim
+
+RUN useradd --uid 1000 --create-home --shell /usr/sbin/nologin attractor
+
+COPY --from=build /src/target/release/attractord /usr/local/bin/attractord
+COPY --from=build /src/target/release/atctl /usr/local/bin/atctl
+
+# /run/attractor is the socket dir; the host bind-mounts it so local agents
+# reach the daemon at <mount>/attractor_api.sock. Created at runtime by the
+# unit's mount, owned by uid 1000 on both sides.
+USER attractor
+ENV ATTRACTOR_SOCKET_PATH=/run/attractor/attractor_api.sock
+
+ENTRYPOINT ["/usr/local/bin/attractord"]
