@@ -37,6 +37,7 @@ dependencies = [
 name = "attractor-core"
 version = "0.0.0"
 dependencies = [
+ "attractor-proto",
  "blake3",
  "serde",
  "serde_json",

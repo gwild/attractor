@@ -11,6 +11,10 @@ description = "Pure schema + blake3 content-addressing for the Attractor matrix.
 repository = "https://github.com/gwild/attractor"
 
 [dependencies]
+# The frozen WS-1 wire contract (`SourceSpan`/`E2eReceipt`, #14) that the
+# markdown source-map (#2343) lowers into. Same 1.92 floor, pure serde — keeps
+# core attestable on every fleet platform.
+attractor-proto = { path = "../attractor-proto" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 blake3 = "1"
