@@ -30,6 +30,7 @@ use std::collections::HashMap;
 use std::fmt;
 
 use attractor_core::{content_address, AddressError, Cell, ContentHash, Edge, Frame, SourceRef};
+use attractor_proto::E2eReceipt;
 use petgraph::algo::is_cyclic_directed;
 use petgraph::graph::{DiGraph, NodeIndex};
 use serde::{Deserialize, Serialize};
@@ -111,6 +112,17 @@ pub enum StoreError {
         /// The edge's destination.
         to: ContentHash,
     },
+    /// A receipt was attached for an address that is not in the store.
+    ReceiptForUnknown {
+        /// The unknown address.
+        addr: ContentHash,
+    },
+    /// A different receipt is already attached at this address; receipts are
+    /// write-once (idempotent re-attach of an identical receipt is allowed).
+    ReceiptConflict {
+        /// The contested address.
+        addr: ContentHash,
+    },
 }
 
 impl fmt::Display for StoreError {
@@ -123,6 +135,12 @@ impl fmt::Display for StoreError {
             Self::WouldCycle { from, to } => {
                 write!(f, "edge {from} -> {to} would create a cycle")
             }
+            Self::ReceiptForUnknown { addr } => {
+                write!(f, "receipt for {addr} which is not in the store")
+            }
+            Self::ReceiptConflict { addr } => {
+                write!(f, "a different receipt is already attached at {addr}")
+            }
         }
     }
 }
@@ -131,7 +149,10 @@ impl std::error::Error for StoreError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Address(e) => Some(e),
-            Self::DanglingEdge { .. } | Self::WouldCycle { .. } => None,
+            Self::DanglingEdge { .. }
+            | Self::WouldCycle { .. }
+            | Self::ReceiptForUnknown { .. }
+            | Self::ReceiptConflict { .. } => None,
         }
     }
 }
@@ -152,6 +173,7 @@ pub struct Store {
     chain: Vec<ChainEntry>,
     head: Option<ContentHash>,
     provenance: HashMap<ContentHash, Vec<SourceRef>>,
+    receipts: HashMap<ContentHash, E2eReceipt>,
 }
 
 impl Store {
@@ -262,13 +284,13 @@ impl Store {
     /// The current chain head: the hash of the most recent entry, or `None` when
     /// empty. This single value is what to persist/compare for tamper-evidence.
     #[must_use]
-    pub fn head(&self) -> Option<ContentHash> {
+    pub const fn head(&self) -> Option<ContentHash> {
         self.head
     }
 
     /// Number of insertions recorded in the provenance chain.
     #[must_use]
-    pub fn chain_len(&self) -> usize {
+    pub const fn chain_len(&self) -> usize {
         self.chain.len()
     }
 
@@ -298,12 +320,66 @@ impl Store {
     pub fn provenance(&self, addr: &ContentHash) -> &[SourceRef] {
         self.provenance.get(addr).map_or(&[], Vec::as_slice)
     }
+
+    /// Attach the transform receipt that produced `addr`.
+    ///
+    /// Receipts are out-of-band metadata: they make a stored derived node
+    /// auditable without changing its content address. They are write-once:
+    /// the address must already be stored, and attaching a *different* receipt
+    /// to an occupied address is rejected rather than silently replacing the
+    /// audit record (re-attaching an identical receipt is an idempotent no-op,
+    /// mirroring node convergence).
+    ///
+    /// # Errors
+    /// [`StoreError::ReceiptForUnknown`] if `addr` is not in the store;
+    /// [`StoreError::ReceiptConflict`] if a different receipt is already
+    /// attached at `addr`.
+    pub fn attach_receipt(
+        &mut self,
+        addr: ContentHash,
+        receipt: E2eReceipt,
+    ) -> Result<(), StoreError> {
+        if !self.nodes.contains_key(&addr) {
+            return Err(StoreError::ReceiptForUnknown { addr });
+        }
+        if let Some(existing) = self.receipts.get(&addr) {
+            if *existing != receipt {
+                return Err(StoreError::ReceiptConflict { addr });
+            }
+            return Ok(());
+        }
+        self.receipts.insert(addr, receipt);
+        Ok(())
+    }
+
+    /// The transform receipt attached to `addr`, if one was recorded.
+    #[must_use]
+    pub fn receipt(&self, addr: &ContentHash) -> Option<&E2eReceipt> {
+        self.receipts.get(addr)
+    }
+
+    /// Confirm every attached receipt is internally consistent with the store:
+    /// its key resolves to a stored node and matches the receipt's own
+    /// `graph_address`. Catches a receipt swapped onto the wrong address or
+    /// left dangling by a corrupted persistence layer.
+    ///
+    /// Boundary note: receipt *contents* are not committed to the provenance
+    /// chain, so a forged receipt whose `graph_address` matches its key passes
+    /// this check; [`Store::verify_chain`] covers insertion history only.
+    /// Chain-committing receipts is a deliberate follow-up decision.
+    #[must_use]
+    pub fn verify_receipts(&self) -> bool {
+        self.receipts.iter().all(|(addr, receipt)| {
+            self.nodes.contains_key(addr) && addr.to_hex() == receipt.graph_address.as_str()
+        })
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{ChainEntry, Node, Store, StoreError};
     use attractor_core::{Cell, ContentHash, Frame, Primitive, SourceRef};
+    use attractor_proto::{ContentHashHex, E2eReceipt};
     use std::collections::BTreeMap;
 
     fn cell(text: &str) -> Node {
@@ -577,5 +653,85 @@ mod tests {
         let mut s = tampered_base();
         s.chain[0].prev = Some(ContentHash::of(b"pre-genesis"));
         assert!(!s.verify_chain(), "genesis must have no predecessor");
+    }
+
+    // Receipt surface: write-once attach + integrity verification. The
+    // receipts map is outside verify_chain's boundary, so it gets its own
+    // fail-loud rules and its own verifier.
+
+    /// A minimal receipt whose graph_address matches `addr`.
+    fn receipt_for(addr: ContentHash, transform: &str) -> E2eReceipt {
+        E2eReceipt {
+            graph_address: ContentHashHex::new(addr.to_hex()).unwrap(),
+            source_spans: vec![],
+            transform_id: transform.to_owned(),
+            confidence: None,
+            provenance_refs: vec![],
+        }
+    }
+
+    #[test]
+    fn attach_receipt_rejects_unknown_address() {
+        let mut s = Store::new();
+        let addr = ContentHash::of(b"never stored");
+        let err = s.attach_receipt(addr, receipt_for(addr, "t.v0")).unwrap_err();
+        assert!(matches!(err, StoreError::ReceiptForUnknown { .. }));
+    }
+
+    #[test]
+    fn attach_receipt_is_idempotent_for_identical_receipt() {
+        let mut s = Store::new();
+        let addr = s.insert(cell("derived")).unwrap();
+        s.attach_receipt(addr, receipt_for(addr, "t.v0")).unwrap();
+        s.attach_receipt(addr, receipt_for(addr, "t.v0")).unwrap();
+        assert_eq!(s.receipt(&addr).unwrap().transform_id, "t.v0");
+    }
+
+    #[test]
+    fn attach_receipt_rejects_silent_replacement() {
+        let mut s = Store::new();
+        let addr = s.insert(cell("derived")).unwrap();
+        s.attach_receipt(addr, receipt_for(addr, "t.v0")).unwrap();
+        let err = s.attach_receipt(addr, receipt_for(addr, "t.v1")).unwrap_err();
+        assert!(matches!(err, StoreError::ReceiptConflict { .. }));
+        assert_eq!(s.receipt(&addr).unwrap().transform_id, "t.v0", "original must survive");
+    }
+
+    #[test]
+    fn verify_receipts_true_on_honest_store() {
+        let mut s = Store::new();
+        let a = s.insert(cell("a")).unwrap();
+        let b = s.insert(cell("b")).unwrap();
+        s.attach_receipt(a, receipt_for(a, "t.v0")).unwrap();
+        s.attach_receipt(b, receipt_for(b, "t.v0")).unwrap();
+        assert!(s.verify_receipts());
+    }
+
+    #[test]
+    fn swapped_receipts_are_detected() {
+        // A corrupted persistence layer swaps the audit records of two nodes.
+        let mut s = Store::new();
+        let a = s.insert(cell("a")).unwrap();
+        let b = s.insert(cell("b")).unwrap();
+        s.attach_receipt(a, receipt_for(a, "t.v0")).unwrap();
+        s.attach_receipt(b, receipt_for(b, "t.v0")).unwrap();
+        let ra = s.receipts[&a].clone();
+        let rb = s.receipts[&b].clone();
+        s.receipts.insert(a, rb);
+        s.receipts.insert(b, ra);
+        assert!(!s.verify_receipts(), "cross-key receipt swap must be caught");
+    }
+
+    #[test]
+    fn dangling_receipt_is_detected() {
+        // Written underneath the API: a receipt keyed by an address that was
+        // never stored (attach_receipt would have refused it).
+        let mut s = Store::new();
+        let a = s.insert(cell("a")).unwrap();
+        let ghost = ContentHash::of(b"ghost");
+        let r = s.receipts.get(&a).cloned();
+        assert!(r.is_none());
+        s.receipts.insert(ghost, receipt_for(ghost, "t.v0"));
+        assert!(!s.verify_receipts(), "receipt without a stored node must be caught");
     }
 }

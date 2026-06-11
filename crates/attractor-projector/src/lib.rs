@@ -214,6 +214,7 @@ pub fn project_markdown_title_into_store(
     markdown: &[u8],
 ) -> Result<E2eReceipt, ProjectorError> {
     let projection = project_markdown_title(source, markdown)?;
+    let graph_addr = content_hash_from_hex(&projection.receipt.graph_address)?;
     for node in projection.nodes {
         store.insert(node)?;
     }
@@ -224,6 +225,7 @@ pub fn project_markdown_title_into_store(
             link.kind,
         )?;
     }
+    store.attach_receipt(graph_addr, projection.receipt.clone())?;
     Ok(projection.receipt)
 }
 
@@ -299,7 +301,7 @@ mod tests {
         EDGE_DERIVED_FROM, MARKDOWN_TITLE_PROJECTOR,
     };
     use attractor_core::ContentHash;
-    use attractor_proto::ContentHashHex;
+    use attractor_proto::{ApiRequest, ApiResponse, ContentHashHex, GetData, RequestKind};
     use attractor_store::Store;
 
     fn source(markdown: &[u8]) -> MarkdownSource {
@@ -338,6 +340,33 @@ mod tests {
         assert_eq!(receipt.source_spans.len(), 1);
         assert_eq!(store.len(), 2);
         assert_eq!(store.provenance(&ContentHash::of(markdown)).len(), 0);
+    }
+
+    #[test]
+    fn get_returns_projector_receipt_source_spans_after_markdown_insert() {
+        let markdown = b"notes\n# WS-3 Acceptance\nbody\n";
+        let mut store = Store::new();
+        let projector_receipt =
+            project_markdown_title_into_store(&mut store, &source(markdown), markdown).unwrap();
+
+        let get_req = ApiRequest::new(RequestKind::Get {
+            address: projector_receipt.graph_address,
+        });
+        match attractor_api::dispatch_with_store(&get_req, 0, &mut store) {
+            ApiResponse::Ok { data, .. } => {
+                let get: GetData = serde_json::from_value(data).unwrap();
+                assert_eq!(get.receipt.transform_id, MARKDOWN_TITLE_PROJECTOR);
+                assert_eq!(get.receipt.source_spans.len(), 1);
+                assert_eq!(get.receipt.source_spans[0].start, 8);
+                assert_eq!(get.receipt.source_spans[0].end, 23);
+                assert_eq!(
+                    get.receipt.source_spans[0].label.as_deref(),
+                    Some("repo:milton/tasks/wendy.md#WS-3 Acceptance")
+                );
+                assert_eq!(get.receipt.provenance_refs[0].origin, "repo:milton");
+            }
+            other => panic!("expected Ok, got {other:?}"),
+        }
     }
 
     #[test]

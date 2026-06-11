@@ -12,5 +12,6 @@ repository = "https://github.com/gwild/attractor"
 
 [dependencies]
 attractor-core = { path = "../attractor-core" }
+attractor-proto = { path = "../attractor-proto" }
 petgraph = "0.6"
 serde = { version = "1", features = ["derive"] }
