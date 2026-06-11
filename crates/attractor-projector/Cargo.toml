@@ -13,3 +13,6 @@ attractor-core = { path = "../attractor-core" }
 attractor-proto = { path = "../attractor-proto" }
 attractor-store = { path = "../attractor-store" }
 serde_json = "1"
+
+[dev-dependencies]
+attractor-api = { path = "../attractor-api", features = ["store"] }

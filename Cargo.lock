@@ -57,6 +57,7 @@ dependencies = [
 name = "attractor-projector"
 version = "0.0.0"
 dependencies = [
+ "attractor-api",
  "attractor-core",
  "attractor-proto",
  "attractor-store",
@@ -76,6 +77,7 @@ name = "attractor-store"
 version = "0.0.0"
 dependencies = [
  "attractor-core",
+ "attractor-proto",
  "petgraph",
  "serde",
 ]
