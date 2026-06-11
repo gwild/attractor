@@ -158,7 +158,9 @@ pub fn dispatch_with_store(req: &ApiRequest, uptime_secs: u64, store: &mut Store
                     Ok(node_json) => {
                         let wire_addr = hash_hex(&addr);
                         let provenance_refs = provenance_wire(store, &addr);
-                        let receipt = receipt_for_get(wire_addr.clone(), provenance_refs.clone());
+                        let receipt = store.receipt(&addr).cloned().unwrap_or_else(|| {
+                            receipt_for_get(wire_addr.clone(), provenance_refs.clone())
+                        });
                         ApiResponse::ok(GetData {
                             address: wire_addr,
                             node: node_json,

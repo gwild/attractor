@@ -30,6 +30,7 @@ use std::collections::HashMap;
 use std::fmt;
 
 use attractor_core::{content_address, AddressError, Cell, ContentHash, Edge, Frame, SourceRef};
+use attractor_proto::E2eReceipt;
 use petgraph::algo::is_cyclic_directed;
 use petgraph::graph::{DiGraph, NodeIndex};
 use serde::{Deserialize, Serialize};
@@ -152,6 +153,7 @@ pub struct Store {
     chain: Vec<ChainEntry>,
     head: Option<ContentHash>,
     provenance: HashMap<ContentHash, Vec<SourceRef>>,
+    receipts: HashMap<ContentHash, E2eReceipt>,
 }
 
 impl Store {
@@ -262,13 +264,13 @@ impl Store {
     /// The current chain head: the hash of the most recent entry, or `None` when
     /// empty. This single value is what to persist/compare for tamper-evidence.
     #[must_use]
-    pub fn head(&self) -> Option<ContentHash> {
+    pub const fn head(&self) -> Option<ContentHash> {
         self.head
     }
 
     /// Number of insertions recorded in the provenance chain.
     #[must_use]
-    pub fn chain_len(&self) -> usize {
+    pub const fn chain_len(&self) -> usize {
         self.chain.len()
     }
 
@@ -297,6 +299,20 @@ impl Store {
     #[must_use]
     pub fn provenance(&self, addr: &ContentHash) -> &[SourceRef] {
         self.provenance.get(addr).map_or(&[], Vec::as_slice)
+    }
+
+    /// Attach the transform receipt that produced `addr`.
+    ///
+    /// Receipts are out-of-band metadata: they make a stored derived node
+    /// auditable without changing its content address.
+    pub fn attach_receipt(&mut self, addr: ContentHash, receipt: E2eReceipt) {
+        self.receipts.insert(addr, receipt);
+    }
+
+    /// The transform receipt attached to `addr`, if one was recorded.
+    #[must_use]
+    pub fn receipt(&self, addr: &ContentHash) -> Option<&E2eReceipt> {
+        self.receipts.get(addr)
     }
 }
 
