@@ -95,6 +95,37 @@ impl ChainEntry {
     }
 }
 
+/// One link in the receipt audit chain: the stored node address, the attached
+/// receipt's content hash, and the previous receipt entry hash.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ReceiptChainEntry {
+    /// The stored node whose receipt was attached.
+    pub node: ContentHash,
+    /// Hash of the attached receipt payload.
+    pub receipt: ContentHash,
+    /// The previous [`ReceiptChainEntry::hash`], or `None` for the first receipt.
+    pub prev: Option<ContentHash>,
+}
+
+impl ReceiptChainEntry {
+    /// This entry's own hash, committing to its node, receipt payload, and
+    /// predecessor.
+    #[must_use]
+    pub fn hash(&self) -> ContentHash {
+        let mut bytes = Vec::with_capacity(1 + 32 + 32 + 32);
+        bytes.extend_from_slice(self.node.as_bytes());
+        bytes.extend_from_slice(self.receipt.as_bytes());
+        match &self.prev {
+            Some(p) => {
+                bytes.push(1);
+                bytes.extend_from_slice(p.as_bytes());
+            }
+            None => bytes.push(0),
+        }
+        ContentHash::of(&bytes)
+    }
+}
+
 /// Why a store operation failed.
 #[derive(Debug)]
 pub enum StoreError {
@@ -123,6 +154,8 @@ pub enum StoreError {
         /// The contested address.
         addr: ContentHash,
     },
+    /// The receipt payload could not be content-addressed.
+    ReceiptAddress(serde_json::Error),
 }
 
 impl fmt::Display for StoreError {
@@ -141,6 +174,7 @@ impl fmt::Display for StoreError {
             Self::ReceiptConflict { addr } => {
                 write!(f, "a different receipt is already attached at {addr}")
             }
+            Self::ReceiptAddress(e) => write!(f, "cannot address receipt: {e}"),
         }
     }
 }
@@ -149,6 +183,7 @@ impl std::error::Error for StoreError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Address(e) => Some(e),
+            Self::ReceiptAddress(e) => Some(e),
             Self::DanglingEdge { .. }
             | Self::WouldCycle { .. }
             | Self::ReceiptForUnknown { .. }
@@ -174,6 +209,8 @@ pub struct Store {
     head: Option<ContentHash>,
     provenance: HashMap<ContentHash, Vec<SourceRef>>,
     receipts: HashMap<ContentHash, E2eReceipt>,
+    receipt_chain: Vec<ReceiptChainEntry>,
+    receipt_head: Option<ContentHash>,
 }
 
 impl Store {
@@ -294,6 +331,18 @@ impl Store {
         self.chain.len()
     }
 
+    /// The current receipt-chain head, or `None` when no receipts are attached.
+    #[must_use]
+    pub const fn receipt_head(&self) -> Option<ContentHash> {
+        self.receipt_head
+    }
+
+    /// Number of receipt attachments recorded in the receipt audit chain.
+    #[must_use]
+    pub const fn receipt_chain_len(&self) -> usize {
+        self.receipt_chain.len()
+    }
+
     /// Recompute the chain and confirm it is intact: every entry must commit to
     /// its predecessor's hash and [`Store::head`] must equal the last entry's
     /// hash. Returns `true` for an untampered chain.
@@ -348,6 +397,14 @@ impl Store {
             }
             return Ok(());
         }
+        let receipt_hash = content_address(&receipt).map_err(StoreError::ReceiptAddress)?;
+        let entry = ReceiptChainEntry {
+            node: addr,
+            receipt: receipt_hash,
+            prev: self.receipt_head,
+        };
+        self.receipt_head = Some(entry.hash());
+        self.receipt_chain.push(entry);
         self.receipts.insert(addr, receipt);
         Ok(())
     }
@@ -358,20 +415,43 @@ impl Store {
         self.receipts.get(addr)
     }
 
+    /// Recompute the receipt chain and confirm it is intact.
+    ///
+    /// Each entry commits to the stored node address, the attached receipt's
+    /// content hash, and the previous receipt entry. Returns `true` when the
+    /// receipt audit chain is untampered.
+    #[must_use]
+    pub fn verify_receipt_chain(&self) -> bool {
+        let mut prev: Option<ContentHash> = None;
+        for entry in &self.receipt_chain {
+            if entry.prev != prev {
+                return false;
+            }
+            prev = Some(entry.hash());
+        }
+        prev == self.receipt_head
+    }
+
     /// Confirm every attached receipt is internally consistent with the store:
     /// its key resolves to a stored node and matches the receipt's own
     /// `graph_address`. Catches a receipt swapped onto the wrong address or
     /// left dangling by a corrupted persistence layer.
     ///
-    /// Boundary note: receipt *contents* are not committed to the provenance
-    /// chain, so a forged receipt whose `graph_address` matches its key passes
-    /// this check; [`Store::verify_chain`] covers insertion history only.
-    /// Chain-committing receipts is a deliberate follow-up decision.
+    /// Also verifies the receipt audit chain and confirms each current receipt
+    /// still hashes to the chain entry recorded at attach time, so forged
+    /// receipt contents cannot pass merely by preserving `graph_address`.
     #[must_use]
     pub fn verify_receipts(&self) -> bool {
-        self.receipts.iter().all(|(addr, receipt)| {
-            self.nodes.contains_key(addr) && addr.to_hex() == receipt.graph_address.as_str()
-        })
+        self.verify_receipt_chain()
+            && self.receipts.len() == self.receipt_chain.len()
+            && self.receipt_chain.iter().all(|entry| {
+                let Some(receipt) = self.receipts.get(&entry.node) else {
+                    return false;
+                };
+                self.nodes.contains_key(&entry.node)
+                    && entry.node.to_hex() == receipt.graph_address.as_str()
+                    && content_address(receipt).is_ok_and(|hash| hash == entry.receipt)
+            })
     }
 }
 
@@ -655,9 +735,8 @@ mod tests {
         assert!(!s.verify_chain(), "genesis must have no predecessor");
     }
 
-    // Receipt surface: write-once attach + integrity verification. The
-    // receipts map is outside verify_chain's boundary, so it gets its own
-    // fail-loud rules and its own verifier.
+    // Receipt surface: write-once attach + integrity verification. Receipts
+    // have their own audit chain because they are attached after node insert.
 
     /// A minimal receipt whose graph_address matches `addr`.
     fn receipt_for(addr: ContentHash, transform: &str) -> E2eReceipt {
@@ -685,6 +764,12 @@ mod tests {
         s.attach_receipt(addr, receipt_for(addr, "t.v0")).unwrap();
         s.attach_receipt(addr, receipt_for(addr, "t.v0")).unwrap();
         assert_eq!(s.receipt(&addr).unwrap().transform_id, "t.v0");
+        assert_eq!(
+            s.receipt_chain_len(),
+            1,
+            "idempotent re-attach must not extend the audit chain"
+        );
+        assert!(s.receipt_head().is_some());
     }
 
     #[test]
@@ -704,6 +789,7 @@ mod tests {
         let b = s.insert(cell("b")).unwrap();
         s.attach_receipt(a, receipt_for(a, "t.v0")).unwrap();
         s.attach_receipt(b, receipt_for(b, "t.v0")).unwrap();
+        assert!(s.verify_receipt_chain());
         assert!(s.verify_receipts());
     }
 
@@ -733,5 +819,29 @@ mod tests {
         assert!(r.is_none());
         s.receipts.insert(ghost, receipt_for(ghost, "t.v0"));
         assert!(!s.verify_receipts(), "receipt without a stored node must be caught");
+    }
+
+    #[test]
+    fn forged_receipt_contents_are_detected() {
+        let mut s = Store::new();
+        let a = s.insert(cell("a")).unwrap();
+        s.attach_receipt(a, receipt_for(a, "t.v0")).unwrap();
+        s.receipts.insert(a, receipt_for(a, "forged.v1"));
+        assert!(
+            !s.verify_receipts(),
+            "receipt content changes must fail even when graph_address still matches"
+        );
+    }
+
+    #[test]
+    fn receipt_chain_tampering_is_detected() {
+        let mut s = Store::new();
+        let a = s.insert(cell("a")).unwrap();
+        let b = s.insert(cell("b")).unwrap();
+        s.attach_receipt(a, receipt_for(a, "t.v0")).unwrap();
+        s.attach_receipt(b, receipt_for(b, "t.v0")).unwrap();
+        s.receipt_chain[1].prev = Some(ContentHash::of(b"forged"));
+        assert!(!s.verify_receipt_chain(), "breaking a receipt prev link must fail");
+        assert!(!s.verify_receipts());
     }
 }
