@@ -66,6 +66,13 @@ pub struct ProjectedLink {
 pub enum ProjectorError {
     /// Markdown bytes were not valid UTF-8.
     InvalidUtf8(std::str::Utf8Error),
+    /// Caller-declared source hash did not match the markdown bytes.
+    SourceHashMismatch {
+        /// Hash supplied in [`MarkdownSource::source_hash`].
+        declared: ContentHashHex,
+        /// Hash computed from the markdown bytes.
+        actual: ContentHashHex,
+    },
     /// No promotable markdown title was found.
     MissingTitle,
     /// Content addressing failed.
@@ -82,6 +89,12 @@ impl fmt::Display for ProjectorError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidUtf8(e) => write!(f, "markdown source is not UTF-8: {e}"),
+            Self::SourceHashMismatch { declared, actual } => write!(
+                f,
+                "markdown source hash mismatch: declared {} but computed {}",
+                declared.as_str(),
+                actual.as_str()
+            ),
             Self::MissingTitle => f.write_str("markdown source has no promotable title"),
             Self::Address(e) => write!(f, "cannot address projected node: {e}"),
             Self::Serde(e) => write!(f, "cannot address projected source ref: {e}"),
@@ -98,7 +111,9 @@ impl std::error::Error for ProjectorError {
             Self::Address(e) => Some(e),
             Self::Serde(e) => Some(e),
             Self::Store(e) => Some(e),
-            Self::MissingTitle | Self::InvalidSourceHash(_) => None,
+            Self::SourceHashMismatch { .. }
+            | Self::MissingTitle
+            | Self::InvalidSourceHash(_) => None,
         }
     }
 }
@@ -128,16 +143,25 @@ impl From<StoreError> for ProjectorError {
 /// [`Projection::links`] only after this function returns `Ok`.
 ///
 /// # Errors
-/// Returns [`ProjectorError::InvalidUtf8`] for non-UTF-8 markdown,
+/// Returns [`ProjectorError::SourceHashMismatch`] when the caller-declared
+/// source hash does not match the markdown bytes,
+/// [`ProjectorError::InvalidUtf8`] for non-UTF-8 markdown,
 /// [`ProjectorError::MissingTitle`] when no markdown heading exists, and
 /// address/serialization errors if derived values cannot be addressed.
 pub fn project_markdown_title(
     source: &MarkdownSource,
     markdown: &[u8],
 ) -> Result<Projection, ProjectorError> {
+    let core_source_hash = content_hash_from_hex(&source.source_hash)?;
+    let actual_source_hash = ContentHash::of(markdown);
+    if core_source_hash != actual_source_hash {
+        return Err(ProjectorError::SourceHashMismatch {
+            declared: source.source_hash.clone(),
+            actual: hash_hex(&actual_source_hash),
+        });
+    }
     let text = std::str::from_utf8(markdown).map_err(ProjectorError::InvalidUtf8)?;
     let heading = first_heading(text).ok_or(ProjectorError::MissingTitle)?;
-    let core_source_hash = content_hash_from_hex(&source.source_hash)?;
     let source_ref = SourceRef {
         content_hash: core_source_hash,
         origin: source.origin.clone(),
@@ -298,7 +322,7 @@ fn hash_hex(hash: &ContentHash) -> ContentHashHex {
 mod tests {
     use super::{
         project_markdown_title, project_markdown_title_into_store, MarkdownSource,
-        EDGE_DERIVED_FROM, MARKDOWN_TITLE_PROJECTOR,
+        ProjectorError, EDGE_DERIVED_FROM, MARKDOWN_TITLE_PROJECTOR,
     };
     use attractor_core::ContentHash;
     use attractor_proto::{ApiRequest, ApiResponse, ContentHashHex, GetData, RequestKind};
@@ -307,6 +331,14 @@ mod tests {
     fn source(markdown: &[u8]) -> MarkdownSource {
         MarkdownSource {
             source_hash: ContentHashHex::new(ContentHash::of(markdown).to_hex()).unwrap(),
+            origin: "repo:milton".to_owned(),
+            label: "tasks/wendy.md".to_owned(),
+        }
+    }
+
+    fn source_with_hash(hash_source: &[u8]) -> MarkdownSource {
+        MarkdownSource {
+            source_hash: ContentHashHex::new(ContentHash::of(hash_source).to_hex()).unwrap(),
             origin: "repo:milton".to_owned(),
             label: "tasks/wendy.md".to_owned(),
         }
@@ -340,6 +372,36 @@ mod tests {
         assert_eq!(receipt.source_spans.len(), 1);
         assert_eq!(store.len(), 2);
         assert_eq!(store.provenance(&ContentHash::of(markdown)).len(), 0);
+    }
+
+    #[test]
+    fn rejects_source_hash_mismatch() {
+        let markdown = b"# Current title\n";
+        let stale_markdown = b"# Stale title\n";
+        let err = project_markdown_title(&source_with_hash(stale_markdown), markdown).unwrap_err();
+        match err {
+            ProjectorError::SourceHashMismatch { declared, actual } => {
+                assert_eq!(declared.as_str(), ContentHash::of(stale_markdown).to_hex());
+                assert_eq!(actual.as_str(), ContentHash::of(markdown).to_hex());
+            }
+            other => panic!("expected SourceHashMismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn source_hash_mismatch_does_not_write_store() {
+        let markdown = b"# Current title\n";
+        let stale_markdown = b"# Stale title\n";
+        let mut store = Store::new();
+        assert!(matches!(
+            project_markdown_title_into_store(
+                &mut store,
+                &source_with_hash(stale_markdown),
+                markdown,
+            ),
+            Err(ProjectorError::SourceHashMismatch { .. })
+        ));
+        assert!(store.is_empty());
     }
 
     #[test]
