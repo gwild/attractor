@@ -84,7 +84,10 @@ impl fmt::Display for HashHexError {
         match self {
             Self::WrongLength { len } => write!(f, "content hash hex length {len} != 64"),
             Self::InvalidByte { byte } => {
-                write!(f, "content hash hex contains non-lowercase-hex byte 0x{byte:02x}")
+                write!(
+                    f,
+                    "content hash hex contains non-lowercase-hex byte 0x{byte:02x}"
+                )
             }
         }
     }
@@ -137,6 +140,44 @@ pub struct E2eReceipt {
     pub confidence: Option<f64>,
     /// Provenance refs expected to resolve from the store/API for this graph.
     pub provenance_refs: Vec<ProvenanceRef>,
+}
+
+/// Terminal state for a boundary proof over an attached graph receipt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BoundaryState {
+    /// The receipt key resolves to a stored graph and matches the receipt.
+    Verified,
+    /// The receipt is keyed to an address that is not present in the store.
+    MissingNode,
+    /// The store key and the receipt's claimed graph address diverge.
+    AddressMismatch,
+}
+
+/// Downstream-consumable proof that a graph receipt stayed on its boundary.
+///
+/// `boundary_owner` is the store/graph identity being checked. Source hashes
+/// and provenance refs are evidence only; they make the proof auditable but do
+/// not satisfy the boundary by themselves.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BoundaryDisposition {
+    /// Stable join key for this proof, normally the store key under inspection.
+    pub ref_id: ContentHashHex,
+    /// Declared graph/store owner whose boundary is being checked.
+    pub boundary_owner: ContentHashHex,
+    /// Whether the boundary proof passed.
+    pub boundary_ok: bool,
+    /// Terminal state for the check.
+    pub state: BoundaryState,
+    /// Graph address claimed by the receipt being checked.
+    pub graph_address: ContentHashHex,
+    /// Source hashes carried as integrity evidence, not ownership proof.
+    pub source_hashes: Vec<ContentHashHex>,
+    /// Provenance refs carried as audit evidence.
+    pub provenance_refs: Vec<ProvenanceRef>,
+    /// Human-readable diagnostic for failed checks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
 }
 
 /// Default TCP port for the control plane — the portable transport.
@@ -272,9 +313,8 @@ pub enum ApiResponse {
 
 impl ApiResponse {
     /// Build an `Ok` response from any serializable payload.
-    /// Falls back to `null` if the payload fails to serialize.
     pub fn ok(data: impl Serialize) -> Self {
-        let data = serde_json::to_value(data).unwrap_or(serde_json::Value::Null);
+        let data = serde_json::to_value(data).expect("ApiResponse payload must serialize");
         ApiResponse::Ok { id: None, data }
     }
 
@@ -325,7 +365,10 @@ mod tests {
             serde_json::to_string(&ApiRequest::new(RequestKind::Status)).unwrap(),
             r#"{"kind":{"op":"status"}}"#
         );
-        let with = ApiRequest { id: Some(9), kind: RequestKind::Ping };
+        let with = ApiRequest {
+            id: Some(9),
+            kind: RequestKind::Ping,
+        };
         assert_eq!(
             serde_json::to_string(&with).unwrap(),
             r#"{"id":9,"kind":{"op":"ping"}}"#
@@ -334,13 +377,16 @@ mod tests {
 
     #[test]
     fn verbs_tagged_by_op() {
-        assert_eq!(serde_json::to_string(&RequestKind::Ping).unwrap(), r#"{"op":"ping"}"#);
-        assert_eq!(serde_json::to_string(&RequestKind::Status).unwrap(), r#"{"op":"status"}"#);
         assert_eq!(
-            serde_json::to_string(&RequestKind::Get {
-                address: hash(1),
-            })
-            .unwrap(),
+            serde_json::to_string(&RequestKind::Ping).unwrap(),
+            r#"{"op":"ping"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&RequestKind::Status).unwrap(),
+            r#"{"op":"status"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&RequestKind::Get { address: hash(1) }).unwrap(),
             r#"{"op":"get","address":"0000000000000000000000000000000000000000000000000000000000000001"}"#
         );
         assert_eq!(
@@ -425,6 +471,27 @@ mod tests {
     }
 
     #[test]
+    fn boundary_disposition_round_trips_with_evidence_fields() {
+        let disposition = BoundaryDisposition {
+            ref_id: hash(1),
+            boundary_owner: hash(1),
+            boundary_ok: false,
+            state: BoundaryState::AddressMismatch,
+            graph_address: hash(2),
+            source_hashes: vec![hash(3)],
+            provenance_refs: vec![ProvenanceRef {
+                content_hash: hash(3),
+                origin: "repo:milton".to_owned(),
+            }],
+            message: Some("receipt graph_address does not match store key".to_owned()),
+        };
+        let json = serde_json::to_string(&disposition).unwrap();
+        assert!(json.contains(r#""state":"address_mismatch""#));
+        let back: BoundaryDisposition = serde_json::from_str(&json).unwrap();
+        assert_eq!(disposition, back);
+    }
+
+    #[test]
     fn content_hash_hex_rejects_bad_wire_values() {
         assert!(matches!(
             ContentHashHex::new("abc"),
@@ -441,8 +508,8 @@ mod tests {
     fn content_hash_hex_deserialization_validates() {
         let bad = serde_json::from_str::<ContentHashHex>(r#""ABC""#);
         assert!(bad.is_err());
-        let good = serde_json::from_str::<ContentHashHex>(&format!(r#""{}""#, "a".repeat(64)))
-            .unwrap();
+        let good =
+            serde_json::from_str::<ContentHashHex>(&format!(r#""{}""#, "a".repeat(64))).unwrap();
         assert_eq!(good.as_str(), "a".repeat(64));
     }
 }
