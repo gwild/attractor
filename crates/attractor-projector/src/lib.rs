@@ -21,6 +21,13 @@ use std::fmt;
 
 /// Stable transform identifier for the WS-3 markdown title projector.
 pub const MARKDOWN_TITLE_PROJECTOR: &str = "attractor.projector.markdown.title.v0";
+/// Stable transform identifier for the WS-3 frontmatter `id` projector.
+///
+/// This is the allowlisted `frontmatter id -> node identity` promotion from the
+/// WS-3 working plan (Layer 4): the only frontmatter key promoted to a derived
+/// node by this transform. Every other frontmatter key remains evidence.
+pub const MARKDOWN_FRONTMATTER_ID_PROJECTOR: &str =
+    "attractor.projector.markdown.frontmatter_id.v0";
 /// Edge kind from a derived markdown value back to its source document ref.
 pub const EDGE_DERIVED_FROM: &str = "derived_from";
 
@@ -75,6 +82,8 @@ pub enum ProjectorError {
     },
     /// No promotable markdown title was found.
     MissingTitle,
+    /// No promotable frontmatter `id` was found in a leading `---` block.
+    MissingFrontmatterId,
     /// Content addressing failed.
     Address(attractor_core::AddressError),
     /// JSON content addressing failed for a derived source-ref node.
@@ -96,6 +105,9 @@ impl fmt::Display for ProjectorError {
                 actual.as_str()
             ),
             Self::MissingTitle => f.write_str("markdown source has no promotable title"),
+            Self::MissingFrontmatterId => {
+                f.write_str("markdown source has no promotable frontmatter id")
+            }
             Self::Address(e) => write!(f, "cannot address projected node: {e}"),
             Self::Serde(e) => write!(f, "cannot address projected source ref: {e}"),
             Self::InvalidSourceHash(e) => write!(f, "invalid source hash: {e}"),
@@ -113,6 +125,7 @@ impl std::error::Error for ProjectorError {
             Self::Store(e) => Some(e),
             Self::SourceHashMismatch { .. }
             | Self::MissingTitle
+            | Self::MissingFrontmatterId
             | Self::InvalidSourceHash(_) => None,
         }
     }
@@ -253,6 +266,125 @@ pub fn project_markdown_title_into_store(
     Ok(projection.receipt)
 }
 
+/// Project a note's frontmatter `id` into a derived identity node plus receipt.
+///
+/// This is the allowlisted `frontmatter id -> node identity` promotion. Like
+/// [`project_markdown_title`] it is store-free and produces exactly one derived
+/// node (the identity value) linked `derived_from` its source ref, with a
+/// populated `source_span` pointing at the `id` value inside the frontmatter
+/// block. Only an `id` key in a leading `---` fenced block is promoted; any
+/// other frontmatter key stays evidence and is not projected here.
+///
+/// # Errors
+/// Returns [`ProjectorError::InvalidUtf8`] for non-UTF-8 markdown,
+/// [`ProjectorError::MissingFrontmatterId`] when there is no leading frontmatter
+/// block carrying a non-empty `id`, [`ProjectorError::SourceHashMismatch`] when
+/// the caller-declared `source_hash` does not match the markdown bytes, and
+/// address/serialization errors if derived values cannot be addressed.
+pub fn project_markdown_frontmatter_id(
+    source: &MarkdownSource,
+    markdown: &[u8],
+) -> Result<Projection, ProjectorError> {
+    let core_source_hash = content_hash_from_hex(&source.source_hash)?;
+    let actual_source_hash = ContentHash::of(markdown);
+    if core_source_hash != actual_source_hash {
+        return Err(ProjectorError::SourceHashMismatch {
+            declared: source.source_hash.clone(),
+            actual: hash_hex(&actual_source_hash),
+        });
+    }
+    let text = std::str::from_utf8(markdown).map_err(ProjectorError::InvalidUtf8)?;
+    let id = frontmatter_id(text).ok_or(ProjectorError::MissingFrontmatterId)?;
+    let source_ref = SourceRef {
+        content_hash: core_source_hash,
+        origin: source.origin.clone(),
+    };
+    let derived = Cell {
+        value: Primitive::Text(id.value.to_owned()),
+        source: source_ref.clone(),
+    };
+    let derived_addr = derived.address()?;
+    let derived_hex = hash_hex(&derived_addr);
+
+    let source_ref_cell = Cell {
+        value: Primitive::Ref(core_source_hash),
+        source: source_ref,
+    };
+    let source_ref_addr = source_ref_cell.address()?;
+    let source_ref_hex = hash_hex(&source_ref_addr);
+
+    let span = MarkdownSourceSpan {
+        vault: source.origin.clone(),
+        commit: None,
+        path: source.label.clone(),
+        frontmatter_id: Some(id.value.to_owned()),
+        heading_path: Vec::new(),
+        block_id: None,
+        byte_range: ByteRange {
+            start: id.start,
+            end: id.end,
+        },
+        line_range: LineRange {
+            start: id.line,
+            end: id.line,
+        },
+        syntax_kind: SyntaxKind::Frontmatter,
+        source_hash: core_source_hash,
+    }
+    .to_source_span();
+    let provenance = ProvenanceRef {
+        content_hash: source.source_hash.clone(),
+        origin: source.origin.clone(),
+    };
+    let receipt = E2eReceipt {
+        graph_address: derived_hex.clone(),
+        source_spans: vec![span],
+        transform_id: MARKDOWN_FRONTMATTER_ID_PROJECTOR.to_owned(),
+        confidence: Some(1.0),
+        provenance_refs: vec![provenance],
+    };
+
+    Ok(Projection {
+        nodes: vec![Node::Cell(derived), Node::Cell(source_ref_cell)],
+        links: vec![ProjectedLink {
+            from: derived_hex,
+            to: source_ref_hex,
+            kind: EDGE_DERIVED_FROM.to_owned(),
+        }],
+        receipt,
+    })
+}
+
+/// Project a note's frontmatter `id` and write the derived nodes into `store`.
+///
+/// The store-writing mirror of [`project_markdown_frontmatter_id`], matching the
+/// projection-before-write discipline of [`project_markdown_title_into_store`].
+///
+/// # Errors
+/// Returns the projection errors from [`project_markdown_frontmatter_id`] before
+/// any store mutation, then [`ProjectorError::Store`] if an accepted projected
+/// node or link cannot be written.
+pub fn project_markdown_frontmatter_id_into_store(
+    store: &mut Store,
+    source: &MarkdownSource,
+    markdown: &[u8],
+) -> Result<E2eReceipt, ProjectorError> {
+    let projection = project_markdown_frontmatter_id(source, markdown)?;
+    let graph_addr = content_hash_from_hex(&projection.receipt.graph_address)?;
+    for node in projection.nodes {
+        store.insert(node)?;
+    }
+    for link in projection.links {
+        store.link(
+            content_hash_from_hex(&link.from)?,
+            content_hash_from_hex(&link.to)?,
+            link.kind,
+        )?;
+    }
+    store.attach_receipt(graph_addr, projection.receipt.clone())?;
+    Ok(projection.receipt)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Heading<'a> {
     title: &'a str,
@@ -303,6 +435,87 @@ fn heading_title(line: &str) -> Option<&str> {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FrontmatterId<'a> {
+    value: &'a str,
+    start: u64,
+    end: u64,
+    line: u32,
+}
+
+/// Extract the top-level `id` value from a leading `---` frontmatter block.
+///
+/// Strict v0 shape (fail-loud, no silent coercion), mirroring [`heading_title`]:
+/// the markdown must open with a `---` fence on its first line; the key must be
+/// an unindented `id` immediately before the colon; the value is the trimmed
+/// remainder with at most one matched pair of surrounding quotes removed. The
+/// returned span covers the value text exactly (quote-stripping shifts `start`
+/// inward), preserving the span == derived-value invariant. Indented keys,
+/// block/flow YAML values, and non-leading frontmatter are intentionally not
+/// matched here and remain evidence for a later transform.
+fn frontmatter_id(markdown: &str) -> Option<FrontmatterId<'_>> {
+    let mut offset = 0usize;
+    let mut line_number = 1u32;
+    let mut in_frontmatter = false;
+    for line in markdown.split_inclusive('\n') {
+        let line_no_nl = line.trim_end_matches(['\r', '\n']);
+        if !in_frontmatter {
+            // The fence must be the very first line of the document.
+            if line_number != 1 || line_no_nl != "---" {
+                return None;
+            }
+            in_frontmatter = true;
+            offset += line.len();
+            line_number = line_number.saturating_add(1);
+            continue;
+        }
+        if line_no_nl == "---" {
+            // Closing fence reached with no promotable id.
+            return None;
+        }
+        if let Some(found) = frontmatter_id_on_line(line_no_nl, offset, line_number) {
+            return Some(found);
+        }
+        offset += line.len();
+        line_number = line_number.saturating_add(1);
+    }
+    None
+}
+
+fn frontmatter_id_on_line(line_no_nl: &str, offset: usize, line: u32) -> Option<FrontmatterId<'_>> {
+    let colon = line_no_nl.find(':')?;
+    if &line_no_nl[..colon] != "id" {
+        return None;
+    }
+    let after_colon = &line_no_nl[colon + 1..];
+    let lead_ws = after_colon.len() - after_colon.trim_start().len();
+    let trimmed = after_colon.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let mut value = trimmed;
+    let mut value_start_in_line = colon + 1 + lead_ws;
+    let bytes = trimmed.as_bytes();
+    if trimmed.len() >= 2
+        && (bytes[0] == b'"' || bytes[0] == b'\'')
+        && bytes[trimmed.len() - 1] == bytes[0]
+    {
+        value = &trimmed[1..trimmed.len() - 1];
+        value_start_in_line += 1;
+        if value.is_empty() {
+            return None;
+        }
+    }
+    let start = offset + value_start_in_line;
+    let end = start + value.len();
+    Some(FrontmatterId {
+        value,
+        start: u64::try_from(start).unwrap_or(u64::MAX),
+        end: u64::try_from(end).unwrap_or(u64::MAX),
+        line,
+    })
+}
+
 fn content_hash_from_hex(hex: &ContentHashHex) -> Result<ContentHash, ProjectorError> {
     let mut digest = [0u8; 32];
     for (i, chunk) in hex.as_str().as_bytes().chunks_exact(2).enumerate() {
@@ -321,8 +534,9 @@ fn hash_hex(hash: &ContentHash) -> ContentHashHex {
 #[cfg(test)]
 mod tests {
     use super::{
-        project_markdown_title, project_markdown_title_into_store, MarkdownSource,
-        ProjectorError, EDGE_DERIVED_FROM, MARKDOWN_TITLE_PROJECTOR,
+        project_markdown_frontmatter_id, project_markdown_frontmatter_id_into_store,
+        project_markdown_title, project_markdown_title_into_store, MarkdownSource, ProjectorError,
+        EDGE_DERIVED_FROM, MARKDOWN_FRONTMATTER_ID_PROJECTOR, MARKDOWN_TITLE_PROJECTOR,
     };
     use attractor_core::ContentHash;
     use attractor_proto::{ApiRequest, ApiResponse, ContentHashHex, GetData, RequestKind};
@@ -367,8 +581,8 @@ mod tests {
         let markdown = b"# Gate\nraw scratch that must not be stored\n";
         let mut store = Store::new();
         assert!(store.is_empty());
-        let receipt = project_markdown_title_into_store(&mut store, &source(markdown), markdown)
-            .unwrap();
+        let receipt =
+            project_markdown_title_into_store(&mut store, &source(markdown), markdown).unwrap();
         assert_eq!(receipt.source_spans.len(), 1);
         assert_eq!(store.len(), 2);
         assert_eq!(store.provenance(&ContentHash::of(markdown)).len(), 0);
@@ -427,7 +641,7 @@ mod tests {
                 );
                 assert_eq!(get.receipt.provenance_refs[0].origin, "repo:milton");
             }
-            other => panic!("expected Ok, got {other:?}"),
+            other @ ApiResponse::Error { .. } => panic!("expected Ok, got {other:?}"),
         }
     }
 
@@ -444,7 +658,9 @@ mod tests {
     fn failed_projection_does_not_write_store() {
         let markdown = b"body only\n";
         let mut store = Store::new();
-        assert!(project_markdown_title_into_store(&mut store, &source(markdown), markdown).is_err());
+        assert!(
+            project_markdown_title_into_store(&mut store, &source(markdown), markdown).is_err()
+        );
         assert!(store.is_empty());
     }
 
@@ -468,5 +684,117 @@ mod tests {
         let projection = project_markdown_title(&source(markdown), markdown).unwrap();
         assert_eq!(projection.receipt.source_spans[0].start, 8);
         assert_eq!(projection.receipt.source_spans[0].end, 24);
+    }
+
+    #[test]
+    fn frontmatter_id_projects_identity_with_span() {
+        let markdown = b"---\nid: note-abc\n# Title\n";
+        let projection = project_markdown_frontmatter_id(&source(markdown), markdown).unwrap();
+        assert_eq!(projection.nodes.len(), 2);
+        assert_eq!(projection.links.len(), 1);
+        assert_eq!(projection.links[0].kind, EDGE_DERIVED_FROM);
+        assert_eq!(
+            projection.receipt.transform_id,
+            MARKDOWN_FRONTMATTER_ID_PROJECTOR
+        );
+        assert_eq!(projection.receipt.source_spans.len(), 1);
+        // Span covers the `id` value `note-abc` (bytes 8..16), not the key.
+        assert_eq!(projection.receipt.source_spans[0].start, 8);
+        assert_eq!(projection.receipt.source_spans[0].end, 16);
+        assert_eq!(projection.receipt.provenance_refs[0].origin, "repo:milton");
+        let nodes_json = serde_json::to_string(&projection.nodes).unwrap();
+        assert!(nodes_json.contains("note-abc"));
+    }
+
+    #[test]
+    fn frontmatter_id_strips_quotes_and_shifts_span_inward() {
+        let markdown = b"---\nid: \"quoted-id\"\n---\nbody\n";
+        let projection = project_markdown_frontmatter_id(&source(markdown), markdown).unwrap();
+        // Quote-stripping moves start inward to the value, span == value text.
+        assert_eq!(projection.receipt.source_spans[0].start, 9);
+        assert_eq!(projection.receipt.source_spans[0].end, 18);
+        let nodes_json = serde_json::to_string(&projection.nodes).unwrap();
+        assert!(nodes_json.contains("quoted-id"));
+        assert!(!nodes_json.contains("\\\"quoted-id\\\""));
+    }
+
+    #[test]
+    fn get_returns_frontmatter_id_receipt_after_insert() {
+        let markdown = b"---\nid: ws3-identity\n---\n# Body\n";
+        let mut store = Store::new();
+        let projector_receipt =
+            project_markdown_frontmatter_id_into_store(&mut store, &source(markdown), markdown)
+                .unwrap();
+        assert_eq!(store.len(), 2);
+        let get_req = ApiRequest::new(RequestKind::Get {
+            address: projector_receipt.graph_address,
+        });
+        match attractor_api::dispatch_with_store(&get_req, 0, &mut store) {
+            ApiResponse::Ok { data, .. } => {
+                let get: GetData = serde_json::from_value(data).unwrap();
+                assert_eq!(get.receipt.transform_id, MARKDOWN_FRONTMATTER_ID_PROJECTOR);
+                assert_eq!(get.receipt.source_spans.len(), 1);
+                assert_eq!(get.receipt.provenance_refs[0].origin, "repo:milton");
+            }
+            other @ ApiResponse::Error { .. } => panic!("expected Ok, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn frontmatter_id_promotes_only_top_level_key() {
+        // Indented `id` under another key must NOT be promoted; the unindented
+        // top-level `id` is the one identity value.
+        let markdown = b"---\nmeta:\n  id: nested\nid: real-one\n---\n";
+        let projection = project_markdown_frontmatter_id(&source(markdown), markdown).unwrap();
+        let nodes_json = serde_json::to_string(&projection.nodes).unwrap();
+        assert!(nodes_json.contains("real-one"));
+        assert!(!nodes_json.contains("nested"));
+    }
+
+    #[test]
+    fn frontmatter_id_rejects_source_hash_mismatch() {
+        let markdown = b"---\nid: current\n---\n";
+        let stale_markdown = b"---\nid: stale\n---\n";
+        let err = project_markdown_frontmatter_id(&source_with_hash(stale_markdown), markdown)
+            .unwrap_err();
+        match err {
+            ProjectorError::SourceHashMismatch { declared, actual } => {
+                assert_eq!(declared.as_str(), ContentHash::of(stale_markdown).to_hex());
+                assert_eq!(actual.as_str(), ContentHash::of(markdown).to_hex());
+            }
+            other => panic!("expected SourceHashMismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn frontmatter_id_fails_loud_without_frontmatter() {
+        let markdown = b"# Title only\nbody\n";
+        assert!(project_markdown_frontmatter_id(&source(markdown), markdown).is_err());
+    }
+
+    #[test]
+    fn frontmatter_id_fails_loud_when_block_has_no_id() {
+        let markdown = b"---\ntitle: x\naliases: [a]\n---\n";
+        assert!(project_markdown_frontmatter_id(&source(markdown), markdown).is_err());
+    }
+
+    #[test]
+    fn frontmatter_id_requires_fence_on_first_line() {
+        // A non-leading frontmatter block is not trusted as document identity.
+        let markdown = b"\n---\nid: x\n---\n";
+        assert!(project_markdown_frontmatter_id(&source(markdown), markdown).is_err());
+    }
+
+    #[test]
+    fn failed_frontmatter_projection_does_not_write_store() {
+        let markdown = b"no frontmatter here\n";
+        let mut store = Store::new();
+        assert!(project_markdown_frontmatter_id_into_store(
+            &mut store,
+            &source(markdown),
+            markdown
+        )
+        .is_err());
+        assert!(store.is_empty());
     }
 }
