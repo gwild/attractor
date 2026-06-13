@@ -446,17 +446,21 @@ struct FrontmatterId<'a> {
 /// Extract the top-level `id` value from a leading `---` frontmatter block.
 ///
 /// Strict v0 shape (fail-loud, no silent coercion), mirroring [`heading_title`]:
-/// the markdown must open with a `---` fence on its first line; the key must be
-/// an unindented `id` immediately before the colon; the value is the trimmed
-/// remainder with at most one matched pair of surrounding quotes removed. The
-/// returned span covers the value text exactly (quote-stripping shifts `start`
-/// inward), preserving the span == derived-value invariant. Indented keys,
-/// block/flow YAML values, and non-leading frontmatter are intentionally not
-/// matched here and remain evidence for a later transform.
+/// the markdown must open with a `---` fence on its first line **and be closed by
+/// a matching `---` fence** — an unterminated block is malformed and promotes
+/// nothing (the value is only trusted once the block is known to be a complete
+/// fenced region). The key must be an unindented `id` immediately before the
+/// colon; the value is the trimmed remainder with at most one matched pair of
+/// surrounding quotes removed. The returned span covers the value text exactly
+/// (quote-stripping shifts `start` inward), preserving the span ==
+/// derived-value invariant. Indented keys, block/flow YAML values, and
+/// non-leading frontmatter are intentionally not matched here and remain
+/// evidence for a later transform.
 fn frontmatter_id(markdown: &str) -> Option<FrontmatterId<'_>> {
     let mut offset = 0usize;
     let mut line_number = 1u32;
     let mut in_frontmatter = false;
+    let mut candidate: Option<FrontmatterId<'_>> = None;
     for line in markdown.split_inclusive('\n') {
         let line_no_nl = line.trim_end_matches(['\r', '\n']);
         if !in_frontmatter {
@@ -465,20 +469,18 @@ fn frontmatter_id(markdown: &str) -> Option<FrontmatterId<'_>> {
                 return None;
             }
             in_frontmatter = true;
-            offset += line.len();
-            line_number = line_number.saturating_add(1);
-            continue;
-        }
-        if line_no_nl == "---" {
-            // Closing fence reached with no promotable id.
-            return None;
-        }
-        if let Some(found) = frontmatter_id_on_line(line_no_nl, offset, line_number) {
-            return Some(found);
+        } else if line_no_nl == "---" {
+            // Closing fence — the block is a complete fenced region, so a
+            // candidate found inside it is now promotable (None if none seen).
+            return candidate;
+        } else if candidate.is_none() {
+            candidate = frontmatter_id_on_line(line_no_nl, offset, line_number);
         }
         offset += line.len();
         line_number = line_number.saturating_add(1);
     }
+    // Reached EOF without a closing fence: not a valid fenced block → promote
+    // nothing, even if an `id` line was seen (Wendy data-shape review #26).
     None
 }
 
@@ -688,7 +690,7 @@ mod tests {
 
     #[test]
     fn frontmatter_id_projects_identity_with_span() {
-        let markdown = b"---\nid: note-abc\n# Title\n";
+        let markdown = b"---\nid: note-abc\n---\n# Title\n";
         let projection = project_markdown_frontmatter_id(&source(markdown), markdown).unwrap();
         assert_eq!(projection.nodes.len(), 2);
         assert_eq!(projection.links.len(), 1);
@@ -764,6 +766,15 @@ mod tests {
             }
             other => panic!("expected SourceHashMismatch, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn frontmatter_id_rejects_unterminated_block() {
+        // Wendy #26 data-shape review: an `id` line with no closing `---` fence
+        // is not a valid fenced block and must promote nothing, even though the
+        // `id` text is present.
+        let markdown = b"---\nid: forged\nbody with no closing fence\n";
+        assert!(project_markdown_frontmatter_id(&source(markdown), markdown).is_err());
     }
 
     #[test]
