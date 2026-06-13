@@ -80,6 +80,7 @@ dependencies = [
  "attractor-proto",
  "petgraph",
  "serde",
+ "serde_json",
 ]
 
 [[package]]
