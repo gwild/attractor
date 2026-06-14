@@ -33,6 +33,8 @@ use attractor_core::{content_address, AddressError, Cell, ContentHash, Edge, Fra
 use attractor_proto::E2eReceipt;
 use petgraph::algo::is_cyclic_directed;
 use petgraph::graph::{DiGraph, NodeIndex};
+use petgraph::visit::EdgeRef;
+use petgraph::Direction;
 use serde::{Deserialize, Serialize};
 
 /// An addressable node in the matrix: either a leaf [`Cell`] or a [`Frame`]
@@ -308,6 +310,37 @@ impl Store {
         Ok(Edge { from, to, kind })
     }
 
+    /// Every edge incident to `addr` — the relation-graph read companion to
+    /// [`Store::link`], and the traversal primitive a recall query walks.
+    ///
+    /// Returns outgoing edges (`from == addr`) followed by incoming edges
+    /// (`to == addr`); the caller filters by `kind` (e.g. `references` vs
+    /// `derived_from`) and reads direction off `from`/`to`. An address not in the
+    /// store has no relations and yields an empty vec (not an error) — recall
+    /// over a miss is empty, not a failure.
+    #[must_use]
+    pub fn relations(&self, addr: &ContentHash) -> Vec<Edge> {
+        let Some(&idx) = self.index.get(addr) else {
+            return Vec::new();
+        };
+        let mut edges = Vec::new();
+        for e in self.graph.edges_directed(idx, Direction::Outgoing) {
+            edges.push(Edge {
+                from: *addr,
+                to: self.graph[e.target()],
+                kind: e.weight().clone(),
+            });
+        }
+        for e in self.graph.edges_directed(idx, Direction::Incoming) {
+            edges.push(Edge {
+                from: self.graph[e.source()],
+                to: *addr,
+                kind: e.weight().clone(),
+            });
+        }
+        edges
+    }
+
     /// The current chain head: the hash of the most recent entry, or `None` when
     /// empty. This single value is what to persist/compare for tamper-evidence.
     #[must_use]
@@ -581,6 +614,40 @@ mod tests {
             s.link(a, a, "self"),
             Err(StoreError::WouldCycle { .. })
         ));
+    }
+
+    #[test]
+    fn relations_returns_incident_edges_both_directions() {
+        // a -> b (refs), c -> b (refs): b has one outgoing (none) and two incoming.
+        let mut s = Store::new();
+        let a = s.insert(cell("a")).unwrap();
+        let b = s.insert(cell("b")).unwrap();
+        let c = s.insert(cell("c")).unwrap();
+        s.link(a, b, "references").unwrap();
+        s.link(c, b, "references").unwrap();
+
+        // From a: one outgoing edge to b, no incoming.
+        let a_rel = s.relations(&a);
+        assert_eq!(a_rel.len(), 1);
+        assert_eq!(a_rel[0].from, a);
+        assert_eq!(a_rel[0].to, b);
+        assert_eq!(a_rel[0].kind, "references");
+
+        // From b: two incoming (from a and c), no outgoing.
+        let b_rel = s.relations(&b);
+        assert_eq!(b_rel.len(), 2);
+        assert!(b_rel.iter().all(|e| e.to == b && e.from != b));
+        let mut sources: Vec<ContentHash> = b_rel.iter().map(|e| e.from).collect();
+        sources.sort_by_key(ContentHash::to_hex);
+        let mut want = vec![a, c];
+        want.sort_by_key(ContentHash::to_hex);
+        assert_eq!(sources, want);
+    }
+
+    #[test]
+    fn relations_of_unknown_address_is_empty_not_error() {
+        let s = Store::new();
+        assert!(s.relations(&ContentHash::of(b"never stored")).is_empty());
     }
 
     #[test]

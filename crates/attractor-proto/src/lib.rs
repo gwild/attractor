@@ -245,6 +245,16 @@ pub struct LinkData {
     pub kind: String,
 }
 
+/// Response payload for [`RequestKind::Relations`]: the edges incident to the
+/// queried node, outgoing then incoming. Each edge reuses the [`LinkData`]
+/// `{from, to, kind}` shape; direction is read off `from`/`to` relative to the
+/// queried address.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RelationsData {
+    /// Incident edges (outgoing first, then incoming).
+    pub edges: Vec<LinkData>,
+}
+
 /// Response payload for [`RequestKind::Snapshot`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SnapshotData {
@@ -291,6 +301,12 @@ pub enum RequestKind {
     },
     /// Store integrity snapshot (counts + chain head).
     Snapshot,
+    /// Fetch the edges incident to a node — the relation-graph read/traversal
+    /// verb a recall query walks. Returns outgoing then incoming edges.
+    Relations {
+        /// Node content address whose incident edges to read.
+        address: ContentHashHex,
+    },
 }
 
 /// A control-plane response envelope, serde-tagged on `status`.
