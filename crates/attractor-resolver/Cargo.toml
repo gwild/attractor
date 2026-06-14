@@ -1,0 +1,17 @@
+[package]
+name = "attractor-resolver"
+version = "0.0.0"
+edition = "2021"
+# Consumes attractor-projector receipts (and thus the store leg): Linux-container
+# only, same MSRV floor as the projector it sits above.
+rust-version = "1.96"
+license = "MIT OR Apache-2.0"
+description = "WS-3 batch-time reference resolver: matches reference-evidence targets against co-projected identity nodes, classifying resolved vs unresolved without writing the store."
+repository = "https://github.com/gwild/attractor"
+
+[dependencies]
+attractor-proto = { path = "../attractor-proto" }
+attractor-projector = { path = "../attractor-projector" }
+
+[dev-dependencies]
+attractor-core = { path = "../attractor-core" }
