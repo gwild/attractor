@@ -77,7 +77,51 @@ impl ContentHash {
         }
         s
     }
+
+    /// Parse a 64-digit lowercase-hex digest back into a content address — the
+    /// inverse of [`ContentHash::to_hex`].
+    ///
+    /// # Errors
+    /// [`ParseHashError::WrongLength`] if `hex` is not exactly 64 characters, or
+    /// [`ParseHashError::NotHex`] if any character is not a hex digit.
+    pub fn from_hex(hex: &str) -> Result<Self, ParseHashError> {
+        let bytes = hex.as_bytes();
+        if bytes.len() != 64 {
+            return Err(ParseHashError::WrongLength { len: bytes.len() });
+        }
+        let mut digest = [0u8; 32];
+        for (i, chunk) in bytes.chunks_exact(2).enumerate() {
+            let pair = std::str::from_utf8(chunk).map_err(|_| ParseHashError::NotHex)?;
+            digest[i] = u8::from_str_radix(pair, 16).map_err(|_| ParseHashError::NotHex)?;
+        }
+        Ok(Self(digest))
+    }
 }
+
+/// Why a hex string could not be parsed into a [`ContentHash`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ParseHashError {
+    /// The string was not exactly 64 hex characters.
+    WrongLength {
+        /// The byte length actually received.
+        len: usize,
+    },
+    /// The string contained a character that is not a hex digit.
+    NotHex,
+}
+
+impl fmt::Display for ParseHashError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::WrongLength { len } => {
+                write!(f, "content hash hex must be 64 chars, got {len}")
+            }
+            Self::NotHex => f.write_str("content hash hex contains a non-hex character"),
+        }
+    }
+}
+
+impl std::error::Error for ParseHashError {}
 
 // Hex Debug/Display keeps logs readable and satisfies the crate-wide
 // `missing_debug_implementations` deny without dumping a 32-element array.
@@ -272,6 +316,23 @@ mod tests {
     #[test]
     fn hex_round_trips_length() {
         assert_eq!(ContentHash::of(b"x").to_hex().len(), 64);
+    }
+
+    #[test]
+    fn from_hex_inverts_to_hex() {
+        let h = ContentHash::of(b"some value");
+        assert_eq!(ContentHash::from_hex(&h.to_hex()).unwrap(), h);
+    }
+
+    #[test]
+    fn from_hex_rejects_wrong_length_and_non_hex() {
+        assert_eq!(
+            ContentHash::from_hex("abc"),
+            Err(super::ParseHashError::WrongLength { len: 3 })
+        );
+        // 64 chars but with a non-hex digit.
+        let bad = format!("{}z", "a".repeat(63));
+        assert_eq!(ContentHash::from_hex(&bad), Err(super::ParseHashError::NotHex));
     }
 
     #[test]

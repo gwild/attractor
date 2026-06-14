@@ -1,0 +1,17 @@
+[package]
+name = "attractor-assembly"
+version = "0.0.0"
+edition = "2021"
+# Orchestrates the store-writing projectors + resolver: Linux-container leg,
+# same MSRV floor as the crates it composes.
+rust-version = "1.96"
+license = "MIT OR Apache-2.0"
+description = "WS-3 batch assembly: co-project a note set into the store, then link resolved references (deferring cyclic ones) — the step that lands edges for the e2e."
+repository = "https://github.com/gwild/attractor"
+
+[dependencies]
+attractor-core = { path = "../attractor-core" }
+attractor-proto = { path = "../attractor-proto" }
+attractor-store = { path = "../attractor-store" }
+attractor-projector = { path = "../attractor-projector" }
+attractor-resolver = { path = "../attractor-resolver" }
