@@ -32,18 +32,26 @@
 //!
 //! ## Scope of v0 (this crate)
 //!
-//! This crate performs the **pure classification**: given the receipts emitted
-//! by a co-projected batch, it reports, per reference target, whether it
-//! resolves to an identity present in the batch, and surfaces the
-//! `source_hash -> identity` join an edge-materialization layer needs. It does
-//! **not** write the store or construct edges: the edge endpoints and the
-//! handling of mutual-reference cycles against the store's DAG invariant are a
-//! separate decision (the store is acyclic; a symmetric `references` relation is
-//! not). Keeping resolution pure means the classification is correct regardless
-//! of how — or whether — edges are later materialized.
+//! Two pure passes, neither of which touches the store:
+//!
+//! 1. [`resolve_batch`] — **classification**: per reference target, resolved vs
+//!    unresolved against the batch identities, plus the `source_hash -> identity`
+//!    join the edge pass needs.
+//! 2. [`materialize_references`] — **edge shape** (the WS-3 v0 contract): a
+//!    referencing note's identity points at each resolved target identity
+//!    (`referencing-note-identity -> target-identity`). Edges that would close a
+//!    directed cycle (a mutual or self reference) or whose note has no identity
+//!    in the batch are **deferred as evidence** — recorded with their attempted
+//!    endpoints and reason, never silently dropped, because the store is a DAG
+//!    and a symmetric `references` relation does not fit it (a later cyclic/index
+//!    layer is store-owner territory). Unresolved references stay evidence.
+//!
+//! The crate returns the edges; a caller writes the linked ones to the store.
+//! Keeping both passes pure means the result is correct independent of when or
+//! whether the store is written.
 
 use attractor_proto::{ContentHashHex, E2eReceipt};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 use attractor_projector::{
@@ -264,11 +272,168 @@ pub fn resolve_batch(receipts: &[E2eReceipt]) -> Result<BatchResolution, Resolve
     })
 }
 
+/// A `references` edge the resolver materialized.
+///
+/// A referencing note's identity points at a resolved target identity. Carries
+/// the referencing note's `source_hash` and the occurrence count so a later
+/// multiset/provenance gate can verify the edge against the evidence it came from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResolvedEdge {
+    /// Source endpoint: an identity the referencing note promoted (its title or
+    /// frontmatter-id node address).
+    pub from: ContentHashHex,
+    /// Target endpoint: the resolved identity address (the reference target).
+    pub to: ContentHashHex,
+    /// Edge kind ([`EDGE_REFERENCES`]).
+    pub kind: String,
+    /// Source hash of the note the reference occurs in (provenance anchor).
+    pub referencing_source_hash: ContentHashHex,
+    /// Occurrences (source spans) the reference target carried.
+    pub occurrences: usize,
+}
+
+/// Why a resolved reference was withheld from the store and recorded as evidence
+/// instead.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DeferralReason {
+    /// Linking would close a directed cycle — a mutual reference (A<->B) or a
+    /// note referencing its own identity. The store is a DAG and rejects this;
+    /// v0 records it rather than inventing a non-DAG relation (a later
+    /// cyclic/index layer is store-owner territory).
+    WouldCycle,
+    /// The referencing note promoted no identity in this batch, so there is no
+    /// `from` endpoint to anchor the edge. The target resolved, but the edge has
+    /// no source within the batch.
+    NoReferencingIdentity,
+}
+
+/// A resolved reference recorded as evidence instead of a store edge, with the
+/// endpoints that were attempted and why the link was withheld.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DeferredReference {
+    /// Attempted source endpoint (a referencing-note identity), or `None` when
+    /// the referencing note had no identity in the batch.
+    pub attempted_from: Option<ContentHashHex>,
+    /// Attempted target endpoint (the resolved identity address).
+    pub attempted_to: ContentHashHex,
+    /// Source hash of the referencing note — provenance preserved even though no
+    /// edge was emitted.
+    pub referencing_source_hash: ContentHashHex,
+    /// Why the edge was withheld.
+    pub reason: DeferralReason,
+}
+
+/// The edges a batch's resolved references materialize into: the links the DAG
+/// store can hold, and the references deferred as evidence.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct EdgeMaterialization {
+    /// `references` edges safe to write (acyclic, both endpoints present).
+    pub linked: Vec<ResolvedEdge>,
+    /// Resolved references withheld from the store, recorded as evidence.
+    pub deferred: Vec<DeferredReference>,
+}
+
+/// Does `start` already reach `goal` through the edges added so far? Adding
+/// `from -> to` would close a cycle exactly when `to` already reaches `from`.
+fn reaches<'a>(
+    adjacency: &HashMap<&'a ContentHashHex, Vec<&'a ContentHashHex>>,
+    start: &'a ContentHashHex,
+    goal: &'a ContentHashHex,
+) -> bool {
+    let mut stack = vec![start];
+    let mut seen = HashSet::new();
+    while let Some(node) = stack.pop() {
+        if node == goal {
+            return true;
+        }
+        if !seen.insert(node) {
+            continue;
+        }
+        if let Some(next) = adjacency.get(node) {
+            stack.extend(next.iter().copied());
+        }
+    }
+    false
+}
+
+/// Materialize the `references` edges of a resolved batch.
+///
+/// Per the WS-3 v0 edge contract, a referencing note's identity points at each
+/// resolved target identity (`referencing-note-identity -> target-identity`).
+///
+/// Acyclic edges are returned in [`EdgeMaterialization::linked`]; a reference
+/// whose edge would close a directed cycle (mutual or self reference) or whose
+/// note has no identity in the batch is returned in
+/// [`EdgeMaterialization::deferred`] as evidence — never silently dropped.
+/// Unresolved references are not represented here (they remain projector
+/// evidence). The store is never touched; the caller writes the linked edges.
+///
+/// Cycle handling matches `attractor_store::Store::link`: candidate edges are
+/// considered in `resolutions` order, and one that would make the references
+/// graph cyclic is deferred — so for a mutual reference one direction links and
+/// the cycle-closing direction defers (deterministic on input order). Only
+/// identity->identity `references` edges are formed, and the projector's
+/// `derived_from` edges run identity->source-ref (a leaf with no out-edges), so
+/// checking cycles over the references edges alone is faithful to the full store
+/// graph.
+#[must_use]
+pub fn materialize_references(batch: &BatchResolution) -> EdgeMaterialization {
+    let mut out = EdgeMaterialization::default();
+    let mut adjacency: HashMap<&ContentHashHex, Vec<&ContentHashHex>> = HashMap::new();
+
+    for resolution in batch.resolved() {
+        let to = &resolution.target_address;
+
+        // The referencing note's own identities (its title / frontmatter-id),
+        // deduplicated by address — a note that promotes the same value twice
+        // (e.g. title == frontmatter id) must not yield duplicate edges.
+        let mut seen_from: HashSet<&ContentHashHex> = HashSet::new();
+        let from_identities: Vec<&ContentHashHex> = batch
+            .identities
+            .iter()
+            .filter(|i| i.source_hash == resolution.referencing_source_hash)
+            .map(|i| &i.address)
+            .filter(|a| seen_from.insert(a))
+            .collect();
+
+        if from_identities.is_empty() {
+            out.deferred.push(DeferredReference {
+                attempted_from: None,
+                attempted_to: to.clone(),
+                referencing_source_hash: resolution.referencing_source_hash.clone(),
+                reason: DeferralReason::NoReferencingIdentity,
+            });
+            continue;
+        }
+
+        for from in from_identities {
+            if from == to || reaches(&adjacency, to, from) {
+                out.deferred.push(DeferredReference {
+                    attempted_from: Some(from.clone()),
+                    attempted_to: to.clone(),
+                    referencing_source_hash: resolution.referencing_source_hash.clone(),
+                    reason: DeferralReason::WouldCycle,
+                });
+            } else {
+                adjacency.entry(from).or_default().push(to);
+                out.linked.push(ResolvedEdge {
+                    from: from.clone(),
+                    to: to.clone(),
+                    kind: EDGE_REFERENCES.to_owned(),
+                    referencing_source_hash: resolution.referencing_source_hash.clone(),
+                    occurrences: resolution.occurrences,
+                });
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        owning_source_hash, resolve_batch, IdentityKind, ResolutionStatus, ResolverError,
-        MARKDOWN_REFERENCES_PROJECTOR,
+        materialize_references, owning_source_hash, resolve_batch, DeferralReason, IdentityKind,
+        ResolutionStatus, ResolverError, EDGE_REFERENCES, MARKDOWN_REFERENCES_PROJECTOR,
     };
     use attractor_core::ContentHash;
     use attractor_projector::{
@@ -493,5 +658,127 @@ mod tests {
         let receipt = title_receipt(note, "a.md");
         let expected = ContentHashHex::new(ContentHash::of(note).to_hex()).unwrap();
         assert_eq!(owning_source_hash(&receipt).unwrap(), expected);
+    }
+
+    #[test]
+    fn resolved_reference_links_referencing_identity_to_target() {
+        // Note A is titled "Alpha"; note B is titled "B Note" and references [[Alpha]].
+        let note_a = b"# Alpha\n";
+        let note_b = b"# B Note\n\nsee [[Alpha]]\n";
+
+        let mut receipts = vec![title_receipt(note_a, "a.md"), title_receipt(note_b, "b.md")];
+        receipts.extend(ref_receipts(note_b, "b.md"));
+
+        let batch = resolve_batch(&receipts).unwrap();
+        let edges = materialize_references(&batch);
+
+        assert_eq!(edges.linked.len(), 1);
+        assert!(edges.deferred.is_empty());
+
+        let e = &edges.linked[0];
+        assert_eq!(e.kind, EDGE_REFERENCES);
+        // referencing-note-identity -> target-identity
+        assert_eq!(e.from, title_receipt(note_b, "b.md").graph_address);
+        assert_eq!(e.to, title_receipt(note_a, "a.md").graph_address);
+        // provenance: the referencing note's source hash, and the occurrence count
+        let b_hash = ContentHashHex::new(ContentHash::of(note_b).to_hex()).unwrap();
+        assert_eq!(e.referencing_source_hash, b_hash);
+        assert_eq!(e.occurrences, 1);
+    }
+
+    #[test]
+    fn resolved_reference_without_a_referencing_identity_defers() {
+        // Note A titled "Alpha"; note B has no title/frontmatter, only a reference,
+        // so there is no `from` endpoint to anchor the edge.
+        let note_a = b"# Alpha\n";
+        let note_b = b"[[Alpha]]\n";
+
+        let mut receipts = vec![title_receipt(note_a, "a.md")];
+        receipts.extend(ref_receipts(note_b, "b.md"));
+
+        let batch = resolve_batch(&receipts).unwrap();
+        let edges = materialize_references(&batch);
+
+        assert!(edges.linked.is_empty());
+        assert_eq!(edges.deferred.len(), 1);
+        assert_eq!(
+            edges.deferred[0].reason,
+            DeferralReason::NoReferencingIdentity
+        );
+        assert!(edges.deferred[0].attempted_from.is_none());
+        assert_eq!(
+            edges.deferred[0].attempted_to,
+            title_receipt(note_a, "a.md").graph_address
+        );
+    }
+
+    #[test]
+    fn mutual_reference_links_one_direction_and_defers_the_cycle() {
+        // A references B and B references A; both notes are titled.
+        let note_a = b"# A\n\n[[B]]\n";
+        let note_b = b"# B\n\n[[A]]\n";
+
+        // Deterministic input order: refs(a) (-> B) is considered before refs(b) (-> A).
+        let mut receipts = vec![title_receipt(note_a, "a.md"), title_receipt(note_b, "b.md")];
+        receipts.extend(ref_receipts(note_a, "a.md"));
+        receipts.extend(ref_receipts(note_b, "b.md"));
+
+        let batch = resolve_batch(&receipts).unwrap();
+        assert_eq!(batch.resolved().count(), 2, "both references resolve");
+
+        let edges = materialize_references(&batch);
+        assert_eq!(edges.linked.len(), 1, "one direction holds in the DAG");
+        assert_eq!(edges.deferred.len(), 1, "cycle-closing direction deferred");
+        assert_eq!(edges.deferred[0].reason, DeferralReason::WouldCycle);
+
+        // The deferred edge is the reverse of the linked one.
+        let l = &edges.linked[0];
+        let d = &edges.deferred[0];
+        assert_eq!(d.attempted_from.as_ref(), Some(&l.to));
+        assert_eq!(d.attempted_to, l.from);
+    }
+
+    #[test]
+    fn self_reference_defers_as_a_cycle() {
+        // A note that references its own title is a self-loop.
+        let note_a = b"# Alpha\n\n[[Alpha]]\n";
+        let mut receipts = vec![title_receipt(note_a, "a.md")];
+        receipts.extend(ref_receipts(note_a, "a.md"));
+
+        let batch = resolve_batch(&receipts).unwrap();
+        assert_eq!(batch.resolved().count(), 1);
+
+        let edges = materialize_references(&batch);
+        assert!(edges.linked.is_empty());
+        assert_eq!(edges.deferred.len(), 1);
+        assert_eq!(edges.deferred[0].reason, DeferralReason::WouldCycle);
+        assert_eq!(
+            edges.deferred[0].attempted_from.as_ref(),
+            Some(&edges.deferred[0].attempted_to)
+        );
+    }
+
+    #[test]
+    fn unresolved_reference_is_absent_from_materialization() {
+        // [[Ghost]] resolves to nothing; it stays projector evidence, not a
+        // deferred edge.
+        let note_b = b"# B Note\n\n[[Ghost]]\n";
+        let mut receipts = vec![title_receipt(note_b, "b.md")];
+        receipts.extend(ref_receipts(note_b, "b.md"));
+
+        let batch = resolve_batch(&receipts).unwrap();
+        assert_eq!(batch.unresolved().count(), 1);
+
+        let edges = materialize_references(&batch);
+        assert!(edges.linked.is_empty());
+        assert!(edges.deferred.is_empty());
+    }
+
+    #[test]
+    fn empty_batch_materializes_no_edges() {
+        let batch = resolve_batch(&[]).unwrap();
+        let edges = materialize_references(&batch);
+        assert!(edges.linked.is_empty());
+        assert!(edges.deferred.is_empty());
     }
 }
