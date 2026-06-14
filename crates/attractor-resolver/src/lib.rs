@@ -319,6 +319,11 @@ pub struct DeferredReference {
     /// Source hash of the referencing note — provenance preserved even though no
     /// edge was emitted.
     pub referencing_source_hash: ContentHashHex,
+    /// Occurrences (source spans) the reference target carried. Recorded so a
+    /// multiset/provenance gate can reconcile deferred evidence against the
+    /// projector spans with the same multiplicity a [`ResolvedEdge`] carries —
+    /// a deferred reference must not silently drop span count (Robby, #28).
+    pub occurrences: usize,
     /// Why the edge was withheld.
     pub reason: DeferralReason,
 }
@@ -401,6 +406,7 @@ pub fn materialize_references(batch: &BatchResolution) -> EdgeMaterialization {
                 attempted_from: None,
                 attempted_to: to.clone(),
                 referencing_source_hash: resolution.referencing_source_hash.clone(),
+                occurrences: resolution.occurrences,
                 reason: DeferralReason::NoReferencingIdentity,
             });
             continue;
@@ -412,6 +418,7 @@ pub fn materialize_references(batch: &BatchResolution) -> EdgeMaterialization {
                     attempted_from: Some(from.clone()),
                     attempted_to: to.clone(),
                     referencing_source_hash: resolution.referencing_source_hash.clone(),
+                    occurrences: resolution.occurrences,
                     reason: DeferralReason::WouldCycle,
                 });
             } else {
@@ -710,6 +717,29 @@ mod tests {
             edges.deferred[0].attempted_to,
             title_receipt(note_a, "a.md").graph_address
         );
+        // Provenance multiplicity preserved on deferral (Robby's multiset gate).
+        assert_eq!(edges.deferred[0].occurrences, 1);
+        assert_eq!(
+            edges.deferred[0].referencing_source_hash,
+            ContentHashHex::new(ContentHash::of(note_b).to_hex()).unwrap()
+        );
+    }
+
+    #[test]
+    fn deferred_reference_preserves_occurrence_multiplicity() {
+        // A self-reference that occurs twice defers (cycle) but must keep its
+        // span count, or the multiset gate can't prove no spans vanished.
+        let note_a = b"# Alpha\n\n[[Alpha]] and again [[Alpha]]\n";
+        let mut receipts = vec![title_receipt(note_a, "a.md")];
+        receipts.extend(ref_receipts(note_a, "a.md"));
+
+        let batch = resolve_batch(&receipts).unwrap();
+        let edges = materialize_references(&batch);
+
+        assert!(edges.linked.is_empty());
+        assert_eq!(edges.deferred.len(), 1);
+        assert_eq!(edges.deferred[0].reason, DeferralReason::WouldCycle);
+        assert_eq!(edges.deferred[0].occurrences, 2, "both spans counted");
     }
 
     #[test]
