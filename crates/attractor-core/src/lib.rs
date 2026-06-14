@@ -330,7 +330,6 @@ mod tests {
             ContentHash::from_hex("abc"),
             Err(super::ParseHashError::WrongLength { len: 3 })
         );
-        // 64 chars but with a non-hex digit.
         let bad = format!("{}z", "a".repeat(63));
         assert_eq!(ContentHash::from_hex(&bad), Err(super::ParseHashError::NotHex));
     }

@@ -229,7 +229,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "pending D3 receipt-multiset decision (ReceiptConflict on value convergence) — see #attractor"]
     fn links_resolved_reference_across_two_notes() {
         // Note A titled "Alpha"; note B titled "B Note" references [[Alpha]].
         let notes = vec![
@@ -250,12 +249,29 @@ mod tests {
         let to = ContentHash::from_hex(e.to.as_str()).unwrap();
         assert!(store.contains(&from));
         assert!(store.contains(&to));
-        // Store stayed an acyclic DAG.
+        // Store stayed an acyclic DAG with an intact receipt chain.
         assert!(store.verify_chain());
+        assert!(store.verify_receipts());
+
+        // D3 payoff: the converged target node ("Alpha") is BOTH note A's title
+        // and note B's reference target, so it carries both derivations' receipts
+        // (the multiset that closes the provenance hole) — not one overwriting
+        // the other.
+        let kinds: Vec<&str> = store
+            .receipts(&to)
+            .iter()
+            .map(|r| r.transform_id.as_str())
+            .collect();
+        assert_eq!(
+            kinds.len(),
+            2,
+            "converged node holds title + references receipts"
+        );
+        assert!(kinds.iter().any(|k| k.contains("title")));
+        assert!(kinds.iter().any(|k| k.contains("references")));
     }
 
     #[test]
-    #[ignore = "pending D3 receipt-multiset decision (ReceiptConflict on value convergence) — see #attractor"]
     fn mutual_reference_links_one_and_defers_the_cycle_keeping_store_acyclic() {
         let notes = vec![
             note(b"# A\n\n[[B]]\n", "a.md"),
@@ -272,7 +288,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "pending D3 receipt-multiset decision (ReceiptConflict on value convergence) — see #attractor"]
     fn unresolved_and_no_identity_references_link_nothing() {
         // Note B has a title and references [[Ghost]] (unresolved); note C has no
         // title and references [[Alpha]] which never appears -> also unresolved.
@@ -293,7 +308,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "pending D3 receipt-multiset decision (ReceiptConflict on value convergence) — see #attractor"]
     fn note_without_title_still_projects_references_as_evidence() {
         // A title-less note's reference resolves to another note's title; but the
         // referencing note has no identity, so the edge defers (no `from`).

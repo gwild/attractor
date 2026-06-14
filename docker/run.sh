@@ -31,6 +31,7 @@ if [[ "$USE_STORE" -eq 1 ]]; then
     -p attractor-api
     -p attractor-projector
     -p attractor-resolver
+    -p attractor-assembly
     --features attractor-api/store
   )
 else
