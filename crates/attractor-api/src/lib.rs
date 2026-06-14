@@ -21,7 +21,8 @@ use std::net::{TcpListener, ToSocketAddrs};
 use attractor_core::ContentHash;
 #[cfg(feature = "store")]
 use attractor_proto::{
-    ContentHashHex, E2eReceipt, GetData, InsertData, LinkData, ProvenanceRef, SnapshotData,
+    ContentHashHex, E2eReceipt, GetData, InsertData, LinkData, ProvenanceRef, RelationsData,
+    SnapshotData,
 };
 #[cfg(feature = "store")]
 use attractor_store::{Node, Store, StoreError};
@@ -78,7 +79,8 @@ pub fn dispatch(req: &ApiRequest, uptime_secs: u64) -> ApiResponse {
         RequestKind::Get { .. }
         | RequestKind::Insert { .. }
         | RequestKind::Link { .. }
-        | RequestKind::Snapshot => {
+        | RequestKind::Snapshot
+        | RequestKind::Relations { .. } => {
             if cfg!(feature = "store") {
                 ApiResponse::error(
                     "matrix verb requires dispatch_with_store — rebuild daemon with store feature",
@@ -203,6 +205,20 @@ pub fn dispatch_with_store(req: &ApiRequest, uptime_secs: u64, store: &mut Store
             head: store.head().map(|h| hash_hex(&h)),
             chain_intact: store.verify_chain(),
         }),
+        RequestKind::Relations { address } => match hash_core(address) {
+            Ok(addr) => ApiResponse::ok(RelationsData {
+                edges: store
+                    .relations(&addr)
+                    .into_iter()
+                    .map(|e| LinkData {
+                        from: hash_hex(&e.from),
+                        to: hash_hex(&e.to),
+                        kind: e.kind,
+                    })
+                    .collect(),
+            }),
+            Err(e) => ApiResponse::error(format!("invalid content address: {e}")),
+        },
         _ => ApiResponse::error("unsupported request verb for this daemon version"),
     };
     match req.id {
@@ -577,6 +593,40 @@ mod tests {
                 ApiResponse::Ok { data, .. } => {
                     assert_eq!(data["node_count"], 1);
                     assert_eq!(data["chain_intact"], true);
+                }
+                other => panic!("expected Ok, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn relations_returns_incident_edges() {
+            let mut store = Store::new();
+            let a = store.insert(sample_cell("a")).unwrap();
+            let b = store.insert(sample_cell("b")).unwrap();
+            store.link(a, b, "references").unwrap();
+
+            let req = ApiRequest::new(RequestKind::Relations {
+                address: attractor_proto::ContentHashHex::new(a.to_hex()).unwrap(),
+            });
+            match dispatch_with_store(&req, 0, &mut store) {
+                ApiResponse::Ok { data, .. } => {
+                    let edges = data["edges"].as_array().expect("edges array");
+                    assert_eq!(edges.len(), 1, "full data: {data}");
+                    assert_eq!(edges[0]["from"], a.to_hex());
+                    assert_eq!(edges[0]["to"], b.to_hex());
+                    assert_eq!(edges[0]["kind"], "references");
+                }
+                other => panic!("expected Ok, got {other:?}"),
+            }
+
+            // Unknown address → empty edge set, still Ok (recall over a miss).
+            let miss = ApiRequest::new(RequestKind::Relations {
+                address: attractor_proto::ContentHashHex::new(ContentHash::of(b"nope").to_hex())
+                    .unwrap(),
+            });
+            match dispatch_with_store(&miss, 0, &mut store) {
+                ApiResponse::Ok { data, .. } => {
+                    assert!(data["edges"].as_array().unwrap().is_empty());
                 }
                 other => panic!("expected Ok, got {other:?}"),
             }
