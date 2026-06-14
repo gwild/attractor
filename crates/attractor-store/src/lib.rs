@@ -148,12 +148,6 @@ pub enum StoreError {
         /// The unknown address.
         addr: ContentHash,
     },
-    /// A different receipt is already attached at this address; receipts are
-    /// write-once (idempotent re-attach of an identical receipt is allowed).
-    ReceiptConflict {
-        /// The contested address.
-        addr: ContentHash,
-    },
     /// The receipt payload could not be content-addressed.
     ReceiptAddress(serde_json::Error),
 }
@@ -171,9 +165,6 @@ impl fmt::Display for StoreError {
             Self::ReceiptForUnknown { addr } => {
                 write!(f, "receipt for {addr} which is not in the store")
             }
-            Self::ReceiptConflict { addr } => {
-                write!(f, "a different receipt is already attached at {addr}")
-            }
             Self::ReceiptAddress(e) => write!(f, "cannot address receipt: {e}"),
         }
     }
@@ -186,8 +177,7 @@ impl std::error::Error for StoreError {
             Self::ReceiptAddress(e) => Some(e),
             Self::DanglingEdge { .. }
             | Self::WouldCycle { .. }
-            | Self::ReceiptForUnknown { .. }
-            | Self::ReceiptConflict { .. } => None,
+            | Self::ReceiptForUnknown { .. } => None,
         }
     }
 }
@@ -208,7 +198,7 @@ pub struct Store {
     chain: Vec<ChainEntry>,
     head: Option<ContentHash>,
     provenance: HashMap<ContentHash, Vec<SourceRef>>,
-    receipts: HashMap<ContentHash, E2eReceipt>,
+    receipts: HashMap<ContentHash, Vec<E2eReceipt>>,
     receipt_chain: Vec<ReceiptChainEntry>,
     receipt_head: Option<ContentHash>,
 }
@@ -370,19 +360,22 @@ impl Store {
         self.provenance.get(addr).map_or(&[], Vec::as_slice)
     }
 
-    /// Attach the transform receipt that produced `addr`.
+    /// Attach a transform receipt that produced `addr`.
     ///
     /// Receipts are out-of-band metadata: they make a stored derived node
-    /// auditable without changing its content address. They are write-once:
-    /// the address must already be stored, and attaching a *different* receipt
-    /// to an occupied address is rejected rather than silently replacing the
-    /// audit record (re-attaching an identical receipt is an idempotent no-op,
-    /// mirroring node convergence).
+    /// auditable without changing its content address. Because identity is
+    /// value-only (#2249), one address can be derived by several transforms — a
+    /// note's title and another note's `[[reference]]` converge to the same node
+    /// — so receipts **accumulate per address** as a multiset, mirroring the
+    /// provenance index rather than overwriting. Re-attaching an *identical*
+    /// receipt is an idempotent no-op (no second chain entry); a *distinct*
+    /// receipt is appended. Reading: [`Store::receipts`] returns every
+    /// derivation's receipt; [`Store::receipt`] returns the first for callers
+    /// that still want a single one.
     ///
     /// # Errors
     /// [`StoreError::ReceiptForUnknown`] if `addr` is not in the store;
-    /// [`StoreError::ReceiptConflict`] if a different receipt is already
-    /// attached at `addr`.
+    /// [`StoreError::ReceiptAddress`] if the receipt cannot be content-addressed.
     pub fn attach_receipt(
         &mut self,
         addr: ContentHash,
@@ -391,10 +384,13 @@ impl Store {
         if !self.nodes.contains_key(&addr) {
             return Err(StoreError::ReceiptForUnknown { addr });
         }
-        if let Some(existing) = self.receipts.get(&addr) {
-            if *existing != receipt {
-                return Err(StoreError::ReceiptConflict { addr });
-            }
+        // Idempotent on an exact duplicate: no second chain entry, no dup in the
+        // multiset.
+        if self
+            .receipts
+            .get(&addr)
+            .is_some_and(|bucket| bucket.contains(&receipt))
+        {
             return Ok(());
         }
         let receipt_hash = content_address(&receipt).map_err(StoreError::ReceiptAddress)?;
@@ -405,14 +401,26 @@ impl Store {
         };
         self.receipt_head = Some(entry.hash());
         self.receipt_chain.push(entry);
-        self.receipts.insert(addr, receipt);
+        self.receipts.entry(addr).or_default().push(receipt);
         Ok(())
     }
 
-    /// The transform receipt attached to `addr`, if one was recorded.
+    /// The first transform receipt attached to `addr`, if any.
+    ///
+    /// Compatibility accessor for callers that want a single receipt; a
+    /// converged node may carry several, so multiset-aware code (e.g. the
+    /// provenance/multiset gate) should read [`Store::receipts`] instead.
     #[must_use]
     pub fn receipt(&self, addr: &ContentHash) -> Option<&E2eReceipt> {
-        self.receipts.get(addr)
+        self.receipts.get(addr).and_then(|bucket| bucket.first())
+    }
+
+    /// Every transform receipt attached to `addr`, in attach order — the
+    /// derivation multiset for a (possibly value-converged) node. Empty slice if
+    /// none were attached.
+    #[must_use]
+    pub fn receipts(&self, addr: &ContentHash) -> &[E2eReceipt] {
+        self.receipts.get(addr).map_or(&[], Vec::as_slice)
     }
 
     /// Recompute the receipt chain and confirm it is intact.
@@ -442,15 +450,17 @@ impl Store {
     /// receipt contents cannot pass merely by preserving `graph_address`.
     #[must_use]
     pub fn verify_receipts(&self) -> bool {
+        let total_receipts: usize = self.receipts.values().map(Vec::len).sum();
         self.verify_receipt_chain()
-            && self.receipts.len() == self.receipt_chain.len()
+            && total_receipts == self.receipt_chain.len()
             && self.receipt_chain.iter().all(|entry| {
-                let Some(receipt) = self.receipts.get(&entry.node) else {
-                    return false;
-                };
                 self.nodes.contains_key(&entry.node)
-                    && entry.node.to_hex() == receipt.graph_address.as_str()
-                    && content_address(receipt).is_ok_and(|hash| hash == entry.receipt)
+                    && self.receipts.get(&entry.node).is_some_and(|bucket| {
+                        bucket.iter().any(|receipt| {
+                            entry.node.to_hex() == receipt.graph_address.as_str()
+                                && content_address(receipt).is_ok_and(|hash| hash == entry.receipt)
+                        })
+                    })
             })
     }
 }
@@ -773,13 +783,31 @@ mod tests {
     }
 
     #[test]
-    fn attach_receipt_rejects_silent_replacement() {
+    fn attach_receipt_accumulates_distinct_receipts_per_address() {
+        // Value-only identity (#2249) converges derivations onto one address, so
+        // distinct receipts accumulate (multiset) instead of conflicting.
         let mut s = Store::new();
         let addr = s.insert(cell("derived")).unwrap();
         s.attach_receipt(addr, receipt_for(addr, "t.v0")).unwrap();
-        let err = s.attach_receipt(addr, receipt_for(addr, "t.v1")).unwrap_err();
-        assert!(matches!(err, StoreError::ReceiptConflict { .. }));
-        assert_eq!(s.receipt(&addr).unwrap().transform_id, "t.v0", "original must survive");
+        s.attach_receipt(addr, receipt_for(addr, "t.v1")).unwrap();
+
+        let kinds: Vec<&str> = s
+            .receipts(&addr)
+            .iter()
+            .map(|r| r.transform_id.as_str())
+            .collect();
+        assert_eq!(kinds, ["t.v0", "t.v1"], "both derivations recorded");
+        assert_eq!(
+            s.receipt(&addr).unwrap().transform_id,
+            "t.v0",
+            "compat accessor returns the first"
+        );
+        assert_eq!(
+            s.receipt_chain_len(),
+            2,
+            "each distinct receipt is one chain entry"
+        );
+        assert!(s.verify_receipts(), "multiset receipts verify");
     }
 
     #[test]
@@ -817,7 +845,7 @@ mod tests {
         let ghost = ContentHash::of(b"ghost");
         let r = s.receipts.get(&a).cloned();
         assert!(r.is_none());
-        s.receipts.insert(ghost, receipt_for(ghost, "t.v0"));
+        s.receipts.insert(ghost, vec![receipt_for(ghost, "t.v0")]);
         assert!(!s.verify_receipts(), "receipt without a stored node must be caught");
     }
 
@@ -826,7 +854,7 @@ mod tests {
         let mut s = Store::new();
         let a = s.insert(cell("a")).unwrap();
         s.attach_receipt(a, receipt_for(a, "t.v0")).unwrap();
-        s.receipts.insert(a, receipt_for(a, "forged.v1"));
+        s.receipts.insert(a, vec![receipt_for(a, "forged.v1")]);
         assert!(
             !s.verify_receipts(),
             "receipt content changes must fail even when graph_address still matches"

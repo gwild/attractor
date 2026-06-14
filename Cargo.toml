@@ -13,4 +13,5 @@ members = [
   "crates/attractor-config",
   "crates/attractor-projector",
   "crates/attractor-resolver",
+  "crates/attractor-assembly",
 ]
