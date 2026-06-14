@@ -73,6 +73,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "attractor-resolver"
+version = "0.0.0"
+dependencies = [
+ "attractor-core",
+ "attractor-projector",
+ "attractor-proto",
+]
+
+[[package]]
 name = "attractor-store"
 version = "0.0.0"
 dependencies = [
