@@ -345,4 +345,93 @@ mod tests {
         assert!(out.deferred.is_empty());
         assert_eq!(store.len(), 0);
     }
+
+    /// WS-7 / #2510 consumer recall smoke: Relations traversal + `receipts()`
+    /// multiset on converged evidence refs. Run via `scripts/recall-smoke.sh`
+    /// on sd-3 arm64 (native) or the store-linux Docker leg on Homer (#2288).
+    #[test]
+    fn recall_smoke_ws7_receipts_multiset_on_converged_target() {
+        let notes = vec![
+            note(b"# Alpha\n", "a.md"),
+            note(b"# B Note\n\nsee [[Alpha]]\n", "b.md"),
+        ];
+        let mut store = Store::new();
+        let out = assemble_notes(&mut store, &notes).unwrap();
+        assert_eq!(out.linked.len(), 1, "one references edge linked");
+
+        let to = ContentHash::from_hex(out.linked[0].to.as_str()).unwrap();
+        let from = ContentHash::from_hex(out.linked[0].from.as_str()).unwrap();
+
+        // Consumer recall walk: Relations on the referencing identity, then the
+        // converged target address returned on the edge.
+        let rel_from: Vec<_> = store
+            .relations(&from)
+            .into_iter()
+            .filter(|e| e.kind == EDGE_REFERENCES)
+            .collect();
+        assert_eq!(
+            rel_from.len(),
+            1,
+            "referencing identity has one references edge"
+        );
+        assert_eq!(rel_from[0].to, to);
+
+        let rel_to = store.relations(&to);
+        assert!(
+            rel_to.iter().any(|e| e.kind == EDGE_REFERENCES && e.from == from),
+            "converged target is reachable via Relations"
+        );
+
+        // Acceptance bar (#2716): full `receipts()` vector, never compat `receipt()`.
+        let kinds: Vec<String> = store
+            .receipts(&to)
+            .iter()
+            .map(|r| r.transform_id.clone())
+            .collect();
+        assert_eq!(
+            kinds.len(),
+            2,
+            "converged node holds title + references receipts: {kinds:?}"
+        );
+        assert!(
+            kinds.iter().any(|k| k.contains("title")),
+            "title derivation present: {kinds:?}"
+        );
+        assert!(
+            kinds.iter().any(|k| k.contains("references")),
+            "references derivation present: {kinds:?}"
+        );
+        assert_eq!(
+            kinds.iter().collect::<std::collections::BTreeSet<_>>().len(),
+            2,
+            "receipts must be distinct sources, not duplicates: {kinds:?}"
+        );
+
+        // Idempotent re-attach: exact duplicate must not grow the multiset.
+        let dup = store.receipts(&to)[0].clone();
+        let chain_before = store.receipt_chain_len();
+        store.attach_receipt(to, dup).unwrap();
+        assert_eq!(
+            store.receipts(&to).len(),
+            2,
+            "idempotent re-attach keeps multiset size at 2"
+        );
+        assert_eq!(
+            store.receipt_chain_len(),
+            chain_before,
+            "idempotent re-attach must not extend audit chain"
+        );
+        assert!(store.verify_receipts(), "multiset still verifies after re-attach");
+
+        // Compat `receipt()` drops all-but-first — must not be used for acceptance.
+        let singular = store.receipt(&to).expect("compat accessor returns first");
+        assert_eq!(
+            singular.transform_id, kinds[0],
+            "receipt() singular is first-only; acceptance must use receipts()"
+        );
+        assert_ne!(
+            singular.transform_id, kinds[1],
+            "receipt() would false-green multi-source recall"
+        );
+    }
 }
