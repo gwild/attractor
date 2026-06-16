@@ -98,14 +98,42 @@ fn main() -> ExitCode {
 
     match send(&ApiRequest::new(kind), tcp.as_deref()) {
         Ok(response_line) => {
+            // Always print the daemon response (ok or error) so the operator
+            // sees it, then ADMIT the exit code on the response status. atctl is
+            // the scripted commissioning driver (`insert && link && relations`):
+            // exiting 0 on a {"status":"error"} reply would false-green a failed
+            // live recall (Jimi CR #32). Exit 0 ONLY on status=="ok"; a daemon
+            // error, a missing/non-"ok" status, or a non-JSON response all fail
+            // loud so a malformed response can't count as a successful crossing.
             println!("{response_line}");
-            ExitCode::SUCCESS
+            match response_status(&response_line).as_deref() {
+                Some("ok") => ExitCode::SUCCESS,
+                Some(other) => {
+                    eprintln!("atctl: daemon response status={other:?} (not ok)");
+                    ExitCode::FAILURE
+                }
+                None => {
+                    eprintln!("atctl: daemon response had no usable status field");
+                    ExitCode::FAILURE
+                }
+            }
         }
         Err(e) => {
             eprintln!("atctl: {e}");
             ExitCode::FAILURE
         }
     }
+}
+
+/// Extract the top-level `status` string from a daemon response line. Returns
+/// `None` on non-JSON or a missing/non-string status — the caller fails loud,
+/// so a malformed response can never count as a successful crossing.
+fn response_status(line: &str) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(line)
+        .ok()?
+        .get("status")?
+        .as_str()
+        .map(str::to_owned)
 }
 
 /// Parse exactly one content-address operand, validating the hash hex.
