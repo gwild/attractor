@@ -16,6 +16,8 @@ use attractor_proto::{ApiRequest, ApiResponse, RequestKind};
 use serde::Serialize;
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, ToSocketAddrs};
+#[cfg(feature = "store")]
+use std::path::{Path, PathBuf};
 
 #[cfg(feature = "store")]
 use attractor_core::ContentHash;
@@ -31,12 +33,21 @@ use attractor_store::{Node, Store, StoreError};
 pub const ENV_SOCKET_PATH: &str = "ATTRACTOR_SOCKET_PATH";
 /// Environment variable overriding the TCP bind/connect address.
 pub const ENV_TCP_ADDR: &str = "ATTRACTOR_TCP_ADDR";
+/// Environment variable overriding the durable store snapshot path.
+#[cfg(feature = "store")]
+pub const ENV_STORE_PATH: &str = "ATTRACTOR_STORE_PATH";
+/// Default durable store snapshot path for the Homer container mount.
+#[cfg(feature = "store")]
+pub const DEFAULT_STORE_PATH: &str = "/run/attractor/store.json";
 
 /// Resolve the control socket path from `$ATTRACTOR_SOCKET_PATH`, falling back
 /// to the proto default.
 #[must_use]
 pub fn socket_path() -> String {
-    resolve(std::env::var(ENV_SOCKET_PATH).ok(), attractor_proto::SOCKET_PATH)
+    resolve(
+        std::env::var(ENV_SOCKET_PATH).ok(),
+        attractor_proto::SOCKET_PATH,
+    )
 }
 
 /// Resolve the TCP bind/connect address from `$ATTRACTOR_TCP_ADDR`, falling back
@@ -45,6 +56,13 @@ pub fn socket_path() -> String {
 pub fn tcp_addr() -> String {
     let default = format!("0.0.0.0:{}", attractor_proto::TCP_PORT);
     resolve(std::env::var(ENV_TCP_ADDR).ok(), &default)
+}
+
+/// Resolve the durable store snapshot path.
+#[cfg(feature = "store")]
+#[must_use]
+pub fn store_path() -> String {
+    resolve(std::env::var(ENV_STORE_PATH).ok(), DEFAULT_STORE_PATH)
 }
 
 #[must_use]
@@ -172,10 +190,9 @@ pub fn dispatch_with_store(req: &ApiRequest, uptime_secs: u64, store: &mut Store
                     }
                     Err(e) => ApiResponse::error(format!("node serialization failed: {e}")),
                 },
-                None => ApiResponse::error(format!(
-                    "node {} is not in the store",
-                    address.as_str()
-                )),
+                None => {
+                    ApiResponse::error(format!("node {} is not in the store", address.as_str()))
+                }
             },
             Err(e) => ApiResponse::error(format!("invalid content address: {e}")),
         },
@@ -197,7 +214,9 @@ pub fn dispatch_with_store(req: &ApiRequest, uptime_secs: u64, store: &mut Store
                 }),
                 Err(e) => ApiResponse::error(store_error_message(e)),
             },
-            (Err(e), _) | (_, Err(e)) => ApiResponse::error(format!("invalid content address: {e}")),
+            (Err(e), _) | (_, Err(e)) => {
+                ApiResponse::error(format!("invalid content address: {e}"))
+            }
         },
         RequestKind::Snapshot => ApiResponse::ok(SnapshotData {
             node_count: store.len(),
@@ -331,6 +350,50 @@ where
     Ok(())
 }
 
+/// Serve the JSON-lines control protocol on an already-bound TCP listener,
+/// loading/saving the store snapshot at `store_path`.
+///
+/// # Errors
+/// Returns an error when the snapshot cannot be loaded or when serving returns.
+#[cfg(feature = "store")]
+pub fn serve_tcp_on_persistent<F, P>(
+    listener: TcpListener,
+    uptime: F,
+    store_path: P,
+) -> std::io::Result<()>
+where
+    F: Fn() -> u64,
+    P: AsRef<Path>,
+{
+    let store_path = store_path.as_ref().to_path_buf();
+    let mut store = Store::load_snapshot(&store_path)?;
+    for stream in listener.incoming() {
+        match stream {
+            Ok(s) => {
+                if let Err(e) = serve_one_persistent(s, &uptime, &mut store, &store_path) {
+                    eprintln!("[attractor-api] tcp connection error: {e}");
+                }
+            }
+            Err(e) => eprintln!("[attractor-api] tcp accept error: {e}"),
+        }
+    }
+    Ok(())
+}
+
+/// Serve the JSON-lines control protocol over TCP with a durable store snapshot.
+///
+/// # Errors
+/// Returns the bind error, snapshot load error, or serving error.
+#[cfg(feature = "store")]
+pub fn serve_tcp_persistent<A, F, P>(addr: A, uptime: F, store_path: P) -> std::io::Result<()>
+where
+    A: ToSocketAddrs,
+    F: Fn() -> u64,
+    P: AsRef<Path>,
+{
+    serve_tcp_on_persistent(TcpListener::bind(addr)?, uptime, store_path)
+}
+
 /// Serve the control protocol over a Unix-domain socket.
 ///
 /// # Errors
@@ -357,7 +420,10 @@ where
 /// # Errors
 /// Currently never returns `Err`; the result mirrors [`serve_unix`].
 #[cfg(all(unix, not(feature = "store")))]
-pub fn serve_unix_on<F>(listener: std::os::unix::net::UnixListener, uptime: F) -> std::io::Result<()>
+pub fn serve_unix_on<F>(
+    listener: std::os::unix::net::UnixListener,
+    uptime: F,
+) -> std::io::Result<()>
 where
     F: Fn() -> u64,
 {
@@ -401,7 +467,10 @@ where
 /// # Errors
 /// Currently never returns `Err`; the result mirrors [`serve_unix`].
 #[cfg(all(unix, feature = "store"))]
-pub fn serve_unix_on<F>(listener: std::os::unix::net::UnixListener, uptime: F) -> std::io::Result<()>
+pub fn serve_unix_on<F>(
+    listener: std::os::unix::net::UnixListener,
+    uptime: F,
+) -> std::io::Result<()>
 where
     F: Fn() -> u64,
 {
@@ -417,6 +486,56 @@ where
         }
     }
     Ok(())
+}
+
+/// Serve the control protocol on an already-bound Unix-domain listener,
+/// loading/saving the store snapshot at `store_path`.
+///
+/// # Errors
+/// Returns an error when the snapshot cannot be loaded or when serving returns.
+#[cfg(all(unix, feature = "store"))]
+pub fn serve_unix_on_persistent<F, P>(
+    listener: std::os::unix::net::UnixListener,
+    uptime: F,
+    store_path: P,
+) -> std::io::Result<()>
+where
+    F: Fn() -> u64,
+    P: AsRef<Path>,
+{
+    let store_path = store_path.as_ref().to_path_buf();
+    let mut store = Store::load_snapshot(&store_path)?;
+    for stream in listener.incoming() {
+        match stream {
+            Ok(s) => {
+                if let Err(e) = serve_one_persistent(s, &uptime, &mut store, &store_path) {
+                    eprintln!("[attractor-api] unix connection error: {e}");
+                }
+            }
+            Err(e) => eprintln!("[attractor-api] unix accept error: {e}"),
+        }
+    }
+    Ok(())
+}
+
+/// Serve the control protocol over a Unix-domain socket with a durable store
+/// snapshot.
+///
+/// # Errors
+/// Returns the bind error, snapshot load error, or serving error.
+#[cfg(all(unix, feature = "store"))]
+pub fn serve_unix_persistent<P, F, Q>(path: P, uptime: F, store_path: Q) -> std::io::Result<()>
+where
+    P: AsRef<std::path::Path>,
+    F: Fn() -> u64,
+    Q: AsRef<Path>,
+{
+    use std::os::unix::net::UnixListener;
+    let path = path.as_ref();
+    if path.exists() {
+        std::fs::remove_file(path)?;
+    }
+    serve_unix_on_persistent(UnixListener::bind(path)?, uptime, store_path)
 }
 
 #[cfg(not(feature = "store"))]
@@ -455,6 +574,64 @@ where
     inner.flush()
 }
 
+#[cfg(feature = "store")]
+fn serve_one_persistent<S, F>(
+    stream: S,
+    uptime: &F,
+    store: &mut Store,
+    store_path: &PathBuf,
+) -> std::io::Result<()>
+where
+    S: std::io::Read + Write,
+    F: Fn() -> u64,
+{
+    let mut reader = BufReader::new(stream);
+    let mut line = String::new();
+    if reader.read_line(&mut line)? == 0 {
+        return Ok(());
+    }
+    let resp = handle_line_persistent(line.trim_end(), uptime(), store, store_path);
+    let inner = reader.get_mut();
+    inner.write_all(resp.as_bytes())?;
+    inner.write_all(b"\n")?;
+    inner.flush()
+}
+
+#[cfg(feature = "store")]
+fn handle_line_persistent(
+    line: &str,
+    uptime_secs: u64,
+    store: &mut Store,
+    store_path: &Path,
+) -> String {
+    let resp = match serde_json::from_str::<ApiRequest>(line) {
+        Ok(req) => {
+            let must_persist = matches!(
+                req.kind,
+                RequestKind::Insert { .. } | RequestKind::Link { .. }
+            );
+            let resp = dispatch_with_store(&req, uptime_secs, store);
+            if must_persist && matches!(resp, ApiResponse::Ok { .. }) {
+                if let Err(e) = store.save_snapshot(store_path) {
+                    return serialize_response(ApiResponse::error(format!(
+                        "store persistence failed: {e}"
+                    )));
+                }
+            }
+            resp
+        }
+        Err(e) => ApiResponse::error(format!("malformed request: {e}")),
+    };
+    serialize_response(resp)
+}
+
+#[cfg(feature = "store")]
+fn serialize_response(resp: ApiResponse) -> String {
+    serde_json::to_string(&resp).unwrap_or_else(|_| {
+        r#"{"status":"error","message":"response serialization failed"}"#.to_owned()
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::{dispatch, handle_line, resolve};
@@ -462,13 +639,19 @@ mod tests {
 
     #[test]
     fn resolve_prefers_nonempty_override() {
-        assert_eq!(resolve(Some("/custom.sock".into()), "/default.sock"), "/custom.sock");
+        assert_eq!(
+            resolve(Some("/custom.sock".into()), "/default.sock"),
+            "/custom.sock"
+        );
     }
 
     #[test]
     fn resolve_falls_back_when_absent_or_blank() {
         assert_eq!(resolve(None, "/default.sock"), "/default.sock");
-        assert_eq!(resolve(Some("   ".into()), "/default.sock"), "/default.sock");
+        assert_eq!(
+            resolve(Some("   ".into()), "/default.sock"),
+            "/default.sock"
+        );
     }
 
     #[test]
@@ -492,7 +675,10 @@ mod tests {
 
     #[test]
     fn dispatch_echoes_correlation_id() {
-        let req = ApiRequest { id: Some(7), kind: RequestKind::Ping };
+        let req = ApiRequest {
+            id: Some(7),
+            kind: RequestKind::Ping,
+        };
         match dispatch(&req, 0) {
             ApiResponse::Ok { id, .. } => assert_eq!(id, Some(7)),
             other => panic!("expected Ok with id, got {other:?}"),
@@ -546,8 +732,8 @@ mod tests {
 
     #[cfg(feature = "store")]
     mod store_tests {
-        use crate::dispatch_with_store;
         use crate::dispatch;
+        use crate::dispatch_with_store;
         use attractor_core::{Cell, ContentHash, Primitive, SourceRef};
         use attractor_proto::{ApiRequest, ApiResponse, RequestKind};
         use attractor_store::{Node, Store};
@@ -574,8 +760,7 @@ mod tests {
             match dispatch_with_store(&get_req, 0, &mut store) {
                 ApiResponse::Ok { data, .. } => {
                     assert_eq!(
-                        data["receipt"]["transform_id"],
-                        "attractor.store.get.v0",
+                        data["receipt"]["transform_id"], "attractor.store.get.v0",
                         "full data: {data}"
                     );
                     assert!(data["node"].is_object(), "full data: {data}");
@@ -634,10 +819,7 @@ mod tests {
 
         #[test]
         fn dispatch_without_store_instance_errors_matrix_verbs() {
-            match dispatch(
-                &ApiRequest::new(RequestKind::Snapshot),
-                0,
-            ) {
+            match dispatch(&ApiRequest::new(RequestKind::Snapshot), 0) {
                 ApiResponse::Error { message, .. } => {
                     assert!(message.contains("dispatch_with_store"));
                 }
