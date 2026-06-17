@@ -16,6 +16,7 @@ use attractor_proto::{ApiRequest, ApiResponse, RequestKind};
 use serde::Serialize;
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, ToSocketAddrs};
+use std::path::{Path, PathBuf};
 
 #[cfg(feature = "store")]
 use attractor_core::ContentHash;
@@ -31,6 +32,26 @@ use attractor_store::{Node, Store, StoreError};
 pub const ENV_SOCKET_PATH: &str = "ATTRACTOR_SOCKET_PATH";
 /// Environment variable overriding the TCP bind/connect address.
 pub const ENV_TCP_ADDR: &str = "ATTRACTOR_TCP_ADDR";
+/// Directory where `attractord` persists the in-process store snapshot.
+pub const ENV_STORE_DATA_DIR: &str = "ATTRACTOR_STORE_DATA_DIR";
+
+/// Load the daemon store from `$ATTRACTOR_STORE_DATA_DIR` (required, non-empty).
+///
+/// # Errors
+/// Returns a human-readable message when the env var is missing/blank or load fails.
+#[cfg(feature = "store")]
+pub fn load_store_for_daemon() -> Result<(Store, PathBuf), String> {
+    let dir = std::env::var(ENV_STORE_DATA_DIR).map_err(|_| {
+        format!("{ENV_STORE_DATA_DIR} is required for attractord with the store feature")
+    })?;
+    if dir.trim().is_empty() {
+        return Err(format!("{ENV_STORE_DATA_DIR} must not be empty"));
+    }
+    let path = PathBuf::from(dir);
+    Store::load_from_dir(&path)
+        .map(|store| (store, path))
+        .map_err(|e| e.to_string())
+}
 
 /// Resolve the control socket path from `$ATTRACTOR_SOCKET_PATH`, falling back
 /// to the proto default.
@@ -296,12 +317,12 @@ where
 /// # Errors
 /// Returns the bind error if `addr` can't be listened on.
 #[cfg(feature = "store")]
-pub fn serve_tcp<A, F>(addr: A, uptime: F) -> std::io::Result<()>
+pub fn serve_tcp<A, F>(addr: A, uptime: F, store: Store, persist_dir: Option<&Path>) -> std::io::Result<()>
 where
     A: ToSocketAddrs,
     F: Fn() -> u64,
 {
-    serve_tcp_on(TcpListener::bind(addr)?, uptime)
+    serve_tcp_on(TcpListener::bind(addr)?, uptime, store, persist_dir)
 }
 
 /// Serve the JSON-lines control protocol on an already-bound TCP listener,
@@ -313,15 +334,14 @@ where
 /// # Errors
 /// Currently never returns `Err`; the result mirrors [`serve_tcp`].
 #[cfg(feature = "store")]
-pub fn serve_tcp_on<F>(listener: TcpListener, uptime: F) -> std::io::Result<()>
+pub fn serve_tcp_on<F>(listener: TcpListener, uptime: F, mut store: Store, persist_dir: Option<&Path>) -> std::io::Result<()>
 where
     F: Fn() -> u64,
 {
-    let mut store = Store::new();
     for stream in listener.incoming() {
         match stream {
             Ok(s) => {
-                if let Err(e) = serve_one(s, &uptime, &mut store) {
+                if let Err(e) = serve_one(s, &uptime, &mut store, persist_dir) {
                     eprintln!("[attractor-api] tcp connection error: {e}");
                 }
             }
@@ -379,7 +399,7 @@ where
 /// # Errors
 /// Returns the bind error if `path` can't be bound.
 #[cfg(all(unix, feature = "store"))]
-pub fn serve_unix<P, F>(path: P, uptime: F) -> std::io::Result<()>
+pub fn serve_unix<P, F>(path: P, uptime: F, store: Store, persist_dir: Option<&Path>) -> std::io::Result<()>
 where
     P: AsRef<std::path::Path>,
     F: Fn() -> u64,
@@ -389,7 +409,7 @@ where
     if path.exists() {
         std::fs::remove_file(path)?;
     }
-    serve_unix_on(UnixListener::bind(path)?, uptime)
+    serve_unix_on(UnixListener::bind(path)?, uptime, store, persist_dir)
 }
 
 /// Serve the control protocol on an already-bound Unix-domain listener, with
@@ -401,15 +421,14 @@ where
 /// # Errors
 /// Currently never returns `Err`; the result mirrors [`serve_unix`].
 #[cfg(all(unix, feature = "store"))]
-pub fn serve_unix_on<F>(listener: std::os::unix::net::UnixListener, uptime: F) -> std::io::Result<()>
+pub fn serve_unix_on<F>(listener: std::os::unix::net::UnixListener, uptime: F, mut store: Store, persist_dir: Option<&Path>) -> std::io::Result<()>
 where
     F: Fn() -> u64,
 {
-    let mut store = Store::new();
     for stream in listener.incoming() {
         match stream {
             Ok(s) => {
-                if let Err(e) = serve_one(s, &uptime, &mut store) {
+                if let Err(e) = serve_one(s, &uptime, &mut store, persist_dir) {
                     eprintln!("[attractor-api] unix connection error: {e}");
                 }
             }
@@ -438,7 +457,7 @@ where
 }
 
 #[cfg(feature = "store")]
-fn serve_one<S, F>(stream: S, uptime: &F, store: &mut Store) -> std::io::Result<()>
+fn serve_one<S, F>(stream: S, uptime: &F, store: &mut Store, persist_dir: Option<&Path>) -> std::io::Result<()>
 where
     S: std::io::Read + Write,
     F: Fn() -> u64,
@@ -449,6 +468,11 @@ where
         return Ok(());
     }
     let resp = handle_line(line.trim_end(), uptime(), store);
+    if let Some(dir) = persist_dir {
+        store.save_to_dir(dir).map_err(|e: StoreError| {
+            std::io::Error::other(format!("store persistence failed: {e}"))
+        })?;
+    }
     let inner = reader.get_mut();
     inner.write_all(resp.as_bytes())?;
     inner.write_all(b"\n")?;

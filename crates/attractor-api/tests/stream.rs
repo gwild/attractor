@@ -13,10 +13,20 @@ use attractor_api::serve_tcp_on;
 use attractor_proto::ApiResponse;
 
 /// Bind port 0, start the server thread, return the bound address.
+#[cfg(not(feature = "store"))]
 fn spawn_tcp_server() -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind port 0");
     let addr = listener.local_addr().expect("local_addr");
     std::thread::spawn(move || serve_tcp_on(listener, || 0));
+    addr
+}
+
+/// Bind port 0, start the server thread, return the bound address.
+#[cfg(feature = "store")]
+fn spawn_tcp_server() -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind port 0");
+    let addr = listener.local_addr().expect("local_addr");
+    std::thread::spawn(move || serve_tcp_on(listener, || 0, attractor_store::Store::new(), None));
     addr
 }
 
@@ -82,7 +92,12 @@ mod unix_socket {
         std::fs::create_dir_all(&dir).expect("mkdir");
         let path = dir.join("ctl.sock");
         let listener = UnixListener::bind(&path).expect("bind unix socket");
+        #[cfg(not(feature = "store"))]
         std::thread::spawn(move || attractor_api::serve_unix_on(listener, || 0));
+        #[cfg(feature = "store")]
+        std::thread::spawn(move || {
+            attractor_api::serve_unix_on(listener, || 0, attractor_store::Store::new(), None)
+        });
 
         let mut stream = UnixStream::connect(&path).expect("connect");
         stream.write_all(b"{\"kind\":{\"op\":\"ping\"}}\n").expect("write");

@@ -56,7 +56,22 @@ fn main() -> ExitCode {
     let served = match tcp {
         Some(addr) => {
             eprintln!("[attractord] serving tcp {addr}");
-            attractor_api::serve_tcp(addr, uptime)
+            #[cfg(feature = "store")]
+            {
+                let (store, data_dir) = match attractor_api::load_store_for_daemon() {
+                    Ok(setup) => setup,
+                    Err(message) => {
+                        eprintln!("attractord: {message}");
+                        return ExitCode::from(2);
+                    }
+                };
+                eprintln!("[attractord] store dir {}", data_dir.display());
+                attractor_api::serve_tcp(addr, uptime, store, Some(data_dir.as_path()))
+            }
+            #[cfg(not(feature = "store"))]
+            {
+                attractor_api::serve_tcp(addr, uptime)
+            }
         }
         None => serve_local(uptime),
     };
@@ -75,7 +90,19 @@ fn main() -> ExitCode {
     }
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, feature = "store"))]
+fn serve_local<F>(uptime: F) -> std::io::Result<()>
+where
+    F: Fn() -> u64,
+{
+    let path = attractor_api::socket_path();
+    let (store, data_dir) = attractor_api::load_store_for_daemon().map_err(std::io::Error::other)?;
+    eprintln!("[attractord] store dir {}", data_dir.display());
+    eprintln!("[attractord] serving unix socket {path}");
+    attractor_api::serve_unix(path, uptime, store, Some(data_dir.as_path()))
+}
+
+#[cfg(all(unix, not(feature = "store")))]
 fn serve_local<F>(uptime: F) -> std::io::Result<()>
 where
     F: Fn() -> u64,

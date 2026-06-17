@@ -16,10 +16,14 @@ RUN useradd --uid 1000 --create-home --shell /usr/sbin/nologin attractor
 COPY --from=build /src/target/release/attractord /usr/local/bin/attractord
 COPY --from=build /src/target/release/atctl /usr/local/bin/atctl
 
+RUN mkdir -p /var/lib/attractor/store && chown attractor:attractor /var/lib/attractor/store
+
 # /run/attractor is the socket dir; the host bind-mounts it so local agents
 # reach the daemon at <mount>/attractor_api.sock. Created at runtime by the
 # unit's mount, owned by uid 1000 on both sides.
 USER attractor
 ENV ATTRACTOR_SOCKET_PATH=/run/attractor/attractor_api.sock
+ENV ATTRACTOR_STORE_DATA_DIR=/var/lib/attractor/store
+VOLUME ["/var/lib/attractor/store"]
 
 ENTRYPOINT ["/usr/local/bin/attractord"]

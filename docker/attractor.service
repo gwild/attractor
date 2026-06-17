@@ -1,7 +1,7 @@
 # attractor.service — Attractor daemon on Homer (user unit, #2288 deploy).
 #
 # Install (after building the image, see docker/README.md):
-#   mkdir -p ~/attractor-run ~/.config/systemd/user
+#   mkdir -p ~/attractor-run ~/attractor-data ~/.config/systemd/user
 #   cp docker/attractor.service ~/.config/systemd/user/
 #   systemctl --user daemon-reload && systemctl --user enable --now attractor
 #
@@ -10,9 +10,9 @@
 # unix-socket-only by default — enabling remote access is a deliberate edit
 # (add `--tcp 127.0.0.1:7533` plus a reviewed exposure plan), never a default.
 #
-# The in-process store is memory-only today; a restart clears matrix state.
-# Persistence (store.data_dir in config.example.yaml) is future work — do not
-# treat daemon state as durable until that lands.
+# The in-process store persists to `$ATTRACTOR_STORE_DATA_DIR/store.json` inside
+# the container (bind-mount `%h/attractor-data` in the unit below). A restart
+# reloads that snapshot; without the data volume the store starts empty.
 #
 # Why no Requires=docker.service: this is a USER unit; the user manager cannot
 # see system units, so a Requires/After on docker.service would be silently
@@ -39,6 +39,7 @@ ExecStartPre=/bin/bash -c 'err=$(/usr/bin/docker container inspect attractor 2>&
 ExecStart=/usr/bin/docker run --name attractor --rm --init \
     --user 1000:1000 \
     -v %h/attractor-run:/run/attractor \
+    -v %h/attractor-data:/var/lib/attractor/store \
     attractor-run:latest
 ExecStop=/usr/bin/docker stop attractor
 Restart=on-failure

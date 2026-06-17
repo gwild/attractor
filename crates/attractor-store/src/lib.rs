@@ -28,6 +28,7 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::path::Path;
 
 use attractor_core::{content_address, AddressError, Cell, ContentHash, Edge, Frame, SourceRef};
 use attractor_proto::E2eReceipt;
@@ -68,7 +69,7 @@ impl Node {
 /// One link in the provenance chain: the address that was inserted, plus the
 /// hash of the entry before it (`None` at genesis). Hashing an entry commits to
 /// its predecessor, making the chain tamper-evident.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChainEntry {
     /// The content address inserted at this step.
     pub node: ContentHash,
@@ -99,7 +100,7 @@ impl ChainEntry {
 
 /// One link in the receipt audit chain: the stored node address, the attached
 /// receipt's content hash, and the previous receipt entry hash.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReceiptChainEntry {
     /// The stored node whose receipt was attached.
     pub node: ContentHash,
@@ -152,6 +153,12 @@ pub enum StoreError {
     },
     /// The receipt payload could not be content-addressed.
     ReceiptAddress(serde_json::Error),
+    /// Reading or writing the on-disk store snapshot failed.
+    PersistIo(std::io::Error),
+    /// The on-disk store snapshot could not be encoded or decoded.
+    PersistJson(serde_json::Error),
+    /// The on-disk store snapshot failed integrity checks after load.
+    PersistCorrupt(String),
 }
 
 impl fmt::Display for StoreError {
@@ -168,6 +175,9 @@ impl fmt::Display for StoreError {
                 write!(f, "receipt for {addr} which is not in the store")
             }
             Self::ReceiptAddress(e) => write!(f, "cannot address receipt: {e}"),
+            Self::PersistIo(e) => write!(f, "store persistence io error: {e}"),
+            Self::PersistJson(e) => write!(f, "store persistence json error: {e}"),
+            Self::PersistCorrupt(msg) => write!(f, "store persistence corrupt: {msg}"),
         }
     }
 }
@@ -177,9 +187,12 @@ impl std::error::Error for StoreError {
         match self {
             Self::Address(e) => Some(e),
             Self::ReceiptAddress(e) => Some(e),
+            Self::PersistJson(e) => Some(e),
             Self::DanglingEdge { .. }
             | Self::WouldCycle { .. }
-            | Self::ReceiptForUnknown { .. } => None,
+            | Self::ReceiptForUnknown { .. }
+            | Self::PersistIo(_)
+            | Self::PersistCorrupt(_) => None,
         }
     }
 }
@@ -188,6 +201,23 @@ impl From<AddressError> for StoreError {
     fn from(e: AddressError) -> Self {
         Self::Address(e)
     }
+}
+
+const STORE_SNAPSHOT_VERSION: u32 = 1;
+const STORE_SNAPSHOT_FILE: &str = "store.json";
+
+/// Serializable on-disk snapshot of a [`Store`].
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+struct StoreSnapshot {
+    version: u32,
+    nodes: Vec<(ContentHash, Node)>,
+    edges: Vec<Edge>,
+    chain: Vec<ChainEntry>,
+    head: Option<ContentHash>,
+    provenance: Vec<(ContentHash, Vec<SourceRef>)>,
+    receipts: Vec<(ContentHash, Vec<E2eReceipt>)>,
+    receipt_chain: Vec<ReceiptChainEntry>,
+    receipt_head: Option<ContentHash>,
 }
 
 /// A content-addressed store of [`Node`]s, an acyclic relation graph over their
@@ -495,6 +525,117 @@ impl Store {
                         })
                     })
             })
+    }
+
+    /// Load a store from `data_dir/store.json`, or an empty store when the file
+    /// is absent (first boot).
+    ///
+    /// # Errors
+    /// [`StoreError::PersistIo`] / [`StoreError::PersistJson`] on read/parse
+    /// failure; [`StoreError::PersistCorrupt`] when the snapshot fails integrity
+    /// checks.
+    pub fn load_from_dir(data_dir: &Path) -> Result<Self, StoreError> {
+        let path = data_dir.join(STORE_SNAPSHOT_FILE);
+        if !path.exists() {
+            return Ok(Self::new());
+        }
+        let text = std::fs::read_to_string(&path).map_err(StoreError::PersistIo)?;
+        let snapshot: StoreSnapshot =
+            serde_json::from_str(&text).map_err(StoreError::PersistJson)?;
+        Self::from_snapshot(snapshot)
+    }
+
+    /// Atomically persist this store to `data_dir/store.json`.
+    ///
+    /// # Errors
+    /// [`StoreError::PersistIo`] or [`StoreError::PersistJson`] on failure.
+    pub fn save_to_dir(&self, data_dir: &Path) -> Result<(), StoreError> {
+        std::fs::create_dir_all(data_dir).map_err(StoreError::PersistIo)?;
+        let snapshot = self.to_snapshot();
+        let text = serde_json::to_string_pretty(&snapshot).map_err(StoreError::PersistJson)?;
+        let tmp = data_dir.join(format!("{STORE_SNAPSHOT_FILE}.tmp"));
+        {
+            use std::io::Write;
+            let mut file = std::fs::File::create(&tmp).map_err(StoreError::PersistIo)?;
+            file.write_all(text.as_bytes())
+                .map_err(StoreError::PersistIo)?;
+            file.sync_all().map_err(StoreError::PersistIo)?;
+        }
+        std::fs::rename(&tmp, data_dir.join(STORE_SNAPSHOT_FILE)).map_err(StoreError::PersistIo)?;
+        Ok(())
+    }
+
+    fn to_snapshot(&self) -> StoreSnapshot {
+        let mut edges = Vec::new();
+        for edge_ref in self.graph.edge_references() {
+            edges.push(Edge {
+                from: self.graph[edge_ref.source()],
+                to: self.graph[edge_ref.target()],
+                kind: edge_ref.weight().clone(),
+            });
+        }
+        StoreSnapshot {
+            version: STORE_SNAPSHOT_VERSION,
+            nodes: self.nodes.clone().into_iter().collect(),
+            edges,
+            chain: self.chain.clone(),
+            head: self.head,
+            provenance: self.provenance.clone().into_iter().collect(),
+            receipts: self.receipts.clone().into_iter().collect(),
+            receipt_chain: self.receipt_chain.clone(),
+            receipt_head: self.receipt_head,
+        }
+    }
+
+    fn from_snapshot(snapshot: StoreSnapshot) -> Result<Self, StoreError> {
+        if snapshot.version != STORE_SNAPSHOT_VERSION {
+            return Err(StoreError::PersistCorrupt(format!(
+                "unsupported store snapshot version {}",
+                snapshot.version
+            )));
+        }
+        let mut store = Self {
+            nodes: snapshot.nodes.into_iter().collect(),
+            graph: DiGraph::new(),
+            index: HashMap::new(),
+            chain: snapshot.chain,
+            head: snapshot.head,
+            provenance: snapshot.provenance.into_iter().collect(),
+            receipts: snapshot.receipts.into_iter().collect(),
+            receipt_chain: snapshot.receipt_chain,
+            receipt_head: snapshot.receipt_head,
+        };
+        for addr in store.nodes.keys().copied().collect::<Vec<_>>() {
+            let idx = store.graph.add_node(addr);
+            store.index.insert(addr, idx);
+        }
+        for edge in snapshot.edges {
+            if !store.nodes.contains_key(&edge.from) || !store.nodes.contains_key(&edge.to) {
+                return Err(StoreError::PersistCorrupt(format!(
+                    "edge {} -> {} references a missing node",
+                    edge.from, edge.to
+                )));
+            }
+            let from_idx = store.index[&edge.from];
+            let to_idx = store.index[&edge.to];
+            store.graph.add_edge(from_idx, to_idx, edge.kind);
+        }
+        if is_cyclic_directed(&store.graph) {
+            return Err(StoreError::PersistCorrupt(
+                "restored relation graph contains a cycle".to_owned(),
+            ));
+        }
+        if !store.verify_chain() {
+            return Err(StoreError::PersistCorrupt(
+                "restored provenance chain failed verify_chain".to_owned(),
+            ));
+        }
+        if !store.verify_receipts() {
+            return Err(StoreError::PersistCorrupt(
+                "restored receipt audit chain failed verify_receipts".to_owned(),
+            ));
+        }
+        Ok(store)
     }
 }
 
@@ -938,5 +1079,32 @@ mod tests {
         s.receipt_chain[1].prev = Some(ContentHash::of(b"forged"));
         assert!(!s.verify_receipt_chain(), "breaking a receipt prev link must fail");
         assert!(!s.verify_receipts());
+    }
+
+    #[test]
+    fn save_load_roundtrip_survives_restart() {
+        let dir = std::env::temp_dir().join(format!("attractor-store-persist-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut live = Store::new();
+        let a = live.insert(cell("alpha")).unwrap();
+        let b = live.insert(cell("beta")).unwrap();
+        live.link(b, a, "references").unwrap();
+        live.save_to_dir(&dir).unwrap();
+
+        let restored = Store::load_from_dir(&dir).unwrap();
+        assert_eq!(restored.len(), 2);
+        assert_eq!(restored.chain_len(), 2);
+        assert!(restored.verify_chain());
+        assert!(restored.get(&a).is_some());
+        assert!(restored.get(&b).is_some());
+        let edges = restored.relations(&a);
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].from, b);
+        assert_eq!(edges[0].to, a);
+        assert_eq!(edges[0].kind, "references");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
