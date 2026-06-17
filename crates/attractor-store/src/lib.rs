@@ -28,6 +28,7 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::path::Path;
 
 use attractor_core::{content_address, AddressError, Cell, ContentHash, Edge, Frame, SourceRef};
 use attractor_proto::E2eReceipt;
@@ -68,7 +69,7 @@ impl Node {
 /// One link in the provenance chain: the address that was inserted, plus the
 /// hash of the entry before it (`None` at genesis). Hashing an entry commits to
 /// its predecessor, making the chain tamper-evident.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChainEntry {
     /// The content address inserted at this step.
     pub node: ContentHash,
@@ -99,7 +100,7 @@ impl ChainEntry {
 
 /// One link in the receipt audit chain: the stored node address, the attached
 /// receipt's content hash, and the previous receipt entry hash.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReceiptChainEntry {
     /// The stored node whose receipt was attached.
     pub node: ContentHash,
@@ -190,6 +191,246 @@ impl From<AddressError> for StoreError {
     }
 }
 
+/// Why loading or saving a durable store snapshot failed.
+#[derive(Debug)]
+pub enum PersistenceError {
+    /// Filesystem I/O failed.
+    Io(std::io::Error),
+    /// Snapshot JSON could not be encoded or decoded.
+    Codec(serde_json::Error),
+    /// The decoded snapshot violated store integrity invariants.
+    Integrity(String),
+}
+
+impl fmt::Display for PersistenceError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Io(e) => write!(f, "store persistence I/O failed: {e}"),
+            Self::Codec(e) => write!(f, "store snapshot codec failed: {e}"),
+            Self::Integrity(e) => write!(f, "store snapshot integrity failed: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for PersistenceError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io(e) => Some(e),
+            Self::Codec(e) => Some(e),
+            Self::Integrity(_) => None,
+        }
+    }
+}
+
+impl From<std::io::Error> for PersistenceError {
+    fn from(e: std::io::Error) -> Self {
+        Self::Io(e)
+    }
+}
+
+impl From<serde_json::Error> for PersistenceError {
+    fn from(e: serde_json::Error) -> Self {
+        Self::Codec(e)
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct NodeSnapshot {
+    address: ContentHash,
+    node: Node,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct EdgeSnapshot {
+    from: ContentHash,
+    to: ContentHash,
+    kind: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ProvenanceSnapshot {
+    address: ContentHash,
+    sources: Vec<SourceRef>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ReceiptsSnapshot {
+    address: ContentHash,
+    receipts: Vec<E2eReceipt>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct StoreSnapshot {
+    nodes: Vec<NodeSnapshot>,
+    edges: Vec<EdgeSnapshot>,
+    chain: Vec<ChainEntry>,
+    head: Option<ContentHash>,
+    provenance: Vec<ProvenanceSnapshot>,
+    receipts: Vec<ReceiptsSnapshot>,
+    receipt_chain: Vec<ReceiptChainEntry>,
+    receipt_head: Option<ContentHash>,
+}
+
+impl From<&Store> for StoreSnapshot {
+    fn from(store: &Store) -> Self {
+        let edges = store
+            .graph
+            .edge_references()
+            .map(|edge| EdgeSnapshot {
+                from: store.graph[edge.source()],
+                to: store.graph[edge.target()],
+                kind: edge.weight().clone(),
+            })
+            .collect();
+        let nodes = store
+            .nodes
+            .iter()
+            .map(|(address, node)| NodeSnapshot {
+                address: *address,
+                node: node.clone(),
+            })
+            .collect();
+        let provenance = store
+            .provenance
+            .iter()
+            .map(|(address, sources)| ProvenanceSnapshot {
+                address: *address,
+                sources: sources.clone(),
+            })
+            .collect();
+        let receipts = store
+            .receipts
+            .iter()
+            .map(|(address, receipts)| ReceiptsSnapshot {
+                address: *address,
+                receipts: receipts.clone(),
+            })
+            .collect();
+        Self {
+            nodes,
+            edges,
+            chain: store.chain.clone(),
+            head: store.head,
+            provenance,
+            receipts,
+            receipt_chain: store.receipt_chain.clone(),
+            receipt_head: store.receipt_head,
+        }
+    }
+}
+
+impl StoreSnapshot {
+    fn into_store(self) -> Result<Store, PersistenceError> {
+        let mut nodes = HashMap::new();
+        for item in self.nodes {
+            let actual = item.node.address().map_err(|e| {
+                PersistenceError::Integrity(format!(
+                    "node {} cannot be addressed: {e}",
+                    item.address
+                ))
+            })?;
+            if actual != item.address {
+                return Err(PersistenceError::Integrity(format!(
+                    "node key {} does not match content address {actual}",
+                    item.address
+                )));
+            }
+            if nodes.insert(item.address, item.node).is_some() {
+                return Err(PersistenceError::Integrity(format!(
+                    "duplicate node entry {}",
+                    item.address
+                )));
+            }
+        }
+
+        let mut graph = DiGraph::new();
+        let mut index = HashMap::new();
+        for addr in nodes.keys() {
+            index.insert(*addr, graph.add_node(*addr));
+        }
+        for edge in self.edges {
+            let from_idx = *index.get(&edge.from).ok_or_else(|| {
+                PersistenceError::Integrity(format!(
+                    "edge source {} is not in the snapshot",
+                    edge.from
+                ))
+            })?;
+            let to_idx = *index.get(&edge.to).ok_or_else(|| {
+                PersistenceError::Integrity(format!(
+                    "edge target {} is not in the snapshot",
+                    edge.to
+                ))
+            })?;
+            graph.add_edge(from_idx, to_idx, edge.kind);
+        }
+        if is_cyclic_directed(&graph) {
+            return Err(PersistenceError::Integrity(
+                "relation graph contains a cycle".to_owned(),
+            ));
+        }
+        if let Some(addr) = self.chain.iter().find_map(|entry| {
+            if nodes.contains_key(&entry.node) {
+                None
+            } else {
+                Some(entry.node)
+            }
+        }) {
+            return Err(PersistenceError::Integrity(format!(
+                "chain entry references missing node {addr}"
+            )));
+        }
+
+        let mut provenance = HashMap::new();
+        for item in self.provenance {
+            if !nodes.contains_key(&item.address) {
+                return Err(PersistenceError::Integrity(format!(
+                    "provenance references missing node {}",
+                    item.address
+                )));
+            }
+            if provenance.insert(item.address, item.sources).is_some() {
+                return Err(PersistenceError::Integrity(format!(
+                    "duplicate provenance entry {}",
+                    item.address
+                )));
+            }
+        }
+
+        let mut receipts = HashMap::new();
+        for item in self.receipts {
+            if receipts.insert(item.address, item.receipts).is_some() {
+                return Err(PersistenceError::Integrity(format!(
+                    "duplicate receipts entry {}",
+                    item.address
+                )));
+            }
+        }
+
+        let store = Store {
+            nodes,
+            graph,
+            index,
+            chain: self.chain,
+            head: self.head,
+            provenance,
+            receipts,
+            receipt_chain: self.receipt_chain,
+            receipt_head: self.receipt_head,
+        };
+        if !store.verify_chain() {
+            return Err(PersistenceError::Integrity(
+                "provenance chain does not verify".to_owned(),
+            ));
+        }
+        if !store.verify_receipts() {
+            return Err(PersistenceError::Integrity(
+                "receipt chain does not verify".to_owned(),
+            ));
+        }
+        Ok(store)
+    }
+}
+
 /// A content-addressed store of [`Node`]s, an acyclic relation graph over their
 /// addresses, and the provenance chain of insertions.
 #[derive(Debug, Default)]
@@ -210,6 +451,50 @@ impl Store {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Load a durable store snapshot from `path`.
+    ///
+    /// # Errors
+    /// Returns [`PersistenceError`] on read/decode failure or if the snapshot
+    /// violates store integrity invariants.
+    pub fn load_from_path(path: impl AsRef<Path>) -> Result<Self, PersistenceError> {
+        let bytes = std::fs::read(path)?;
+        let snapshot: StoreSnapshot = serde_json::from_slice(&bytes)?;
+        snapshot.into_store()
+    }
+
+    /// Atomically save a durable store snapshot to `path`.
+    ///
+    /// The snapshot is written to a sibling temporary file and then renamed into
+    /// place, so a successful return means a complete JSON snapshot is present
+    /// at `path`.
+    ///
+    /// # Errors
+    /// Returns [`PersistenceError`] on encode or filesystem failure.
+    pub fn save_to_path(&self, path: impl AsRef<Path>) -> Result<(), PersistenceError> {
+        let path = path.as_ref();
+        let parent = path.parent().ok_or_else(|| {
+            PersistenceError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "store path must have a parent directory",
+            ))
+        })?;
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let filename = path.file_name().ok_or_else(|| {
+            PersistenceError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "store path must include a file name",
+            ))
+        })?;
+        let tmp_filename = format!(".{}.tmp-{}", filename.to_string_lossy(), std::process::id());
+        let tmp_path = path.with_file_name(tmp_filename);
+        let bytes = serde_json::to_vec_pretty(&StoreSnapshot::from(self))?;
+        std::fs::write(&tmp_path, bytes)?;
+        std::fs::rename(tmp_path, path)?;
+        Ok(())
     }
 
     /// Insert a node, returning its content address.
@@ -537,7 +822,10 @@ mod tests {
         let Node::Cell(c) = cell("x") else {
             unreachable!()
         };
-        assert_eq!(Node::Cell(c.clone()).address().unwrap(), c.address().unwrap());
+        assert_eq!(
+            Node::Cell(c.clone()).address().unwrap(),
+            c.address().unwrap()
+        );
     }
 
     #[test]
@@ -695,7 +983,11 @@ mod tests {
         assert_eq!(a, b, "same value must converge regardless of origin");
         assert_eq!(s.len(), 1);
         assert_eq!(s.chain_len(), 1, "convergence must not extend the chain");
-        let origins: Vec<&str> = s.provenance(&a).iter().map(|sr| sr.origin.as_str()).collect();
+        let origins: Vec<&str> = s
+            .provenance(&a)
+            .iter()
+            .map(|sr| sr.origin.as_str())
+            .collect();
         assert_eq!(origins, ["#general", "#issues"]);
     }
 
@@ -743,7 +1035,10 @@ mod tests {
     fn tampered_middle_entry_node_is_detected() {
         let mut s = tampered_base();
         s.chain[1].node = ContentHash::of(b"forged");
-        assert!(!s.verify_chain(), "rewriting a middle entry's node must fail");
+        assert!(
+            !s.verify_chain(),
+            "rewriting a middle entry's node must fail"
+        );
     }
 
     #[test]
@@ -752,7 +1047,10 @@ mod tests {
         // comparison catches this one.
         let mut s = tampered_base();
         s.chain[2].node = ContentHash::of(b"forged");
-        assert!(!s.verify_chain(), "rewriting the last entry's node must fail");
+        assert!(
+            !s.verify_chain(),
+            "rewriting the last entry's node must fail"
+        );
     }
 
     #[test]
@@ -766,7 +1064,10 @@ mod tests {
     fn truncated_chain_is_detected() {
         let mut s = tampered_base();
         s.chain.pop();
-        assert!(!s.verify_chain(), "dropping the last entry must fail against the head");
+        assert!(
+            !s.verify_chain(),
+            "dropping the last entry must fail against the head"
+        );
     }
 
     #[test]
@@ -786,21 +1087,30 @@ mod tests {
             node: ContentHash::of(b"forged"),
             prev: Some(real_last),
         });
-        assert!(!s.verify_chain(), "a well-linked appended entry must still fail the head check");
+        assert!(
+            !s.verify_chain(),
+            "a well-linked appended entry must still fail the head check"
+        );
     }
 
     #[test]
     fn forged_head_is_detected() {
         let mut s = tampered_base();
         s.head = Some(ContentHash::of(b"forged"));
-        assert!(!s.verify_chain(), "a head not matching the last entry must fail");
+        assert!(
+            !s.verify_chain(),
+            "a head not matching the last entry must fail"
+        );
     }
 
     #[test]
     fn nonempty_head_over_empty_chain_is_detected() {
         let mut s = Store::new();
         s.head = Some(ContentHash::of(b"forged"));
-        assert!(!s.verify_chain(), "a head with no chain behind it must fail");
+        assert!(
+            !s.verify_chain(),
+            "a head with no chain behind it must fail"
+        );
     }
 
     #[test]
@@ -830,7 +1140,9 @@ mod tests {
     fn attach_receipt_rejects_unknown_address() {
         let mut s = Store::new();
         let addr = ContentHash::of(b"never stored");
-        let err = s.attach_receipt(addr, receipt_for(addr, "t.v0")).unwrap_err();
+        let err = s
+            .attach_receipt(addr, receipt_for(addr, "t.v0"))
+            .unwrap_err();
         assert!(matches!(err, StoreError::ReceiptForUnknown { .. }));
     }
 
@@ -900,7 +1212,10 @@ mod tests {
         let rb = s.receipts[&b].clone();
         s.receipts.insert(a, rb);
         s.receipts.insert(b, ra);
-        assert!(!s.verify_receipts(), "cross-key receipt swap must be caught");
+        assert!(
+            !s.verify_receipts(),
+            "cross-key receipt swap must be caught"
+        );
     }
 
     #[test]
@@ -913,7 +1228,10 @@ mod tests {
         let r = s.receipts.get(&a).cloned();
         assert!(r.is_none());
         s.receipts.insert(ghost, vec![receipt_for(ghost, "t.v0")]);
-        assert!(!s.verify_receipts(), "receipt without a stored node must be caught");
+        assert!(
+            !s.verify_receipts(),
+            "receipt without a stored node must be caught"
+        );
     }
 
     #[test]
@@ -936,7 +1254,63 @@ mod tests {
         s.attach_receipt(a, receipt_for(a, "t.v0")).unwrap();
         s.attach_receipt(b, receipt_for(b, "t.v0")).unwrap();
         s.receipt_chain[1].prev = Some(ContentHash::of(b"forged"));
-        assert!(!s.verify_receipt_chain(), "breaking a receipt prev link must fail");
+        assert!(
+            !s.verify_receipt_chain(),
+            "breaking a receipt prev link must fail"
+        );
         assert!(!s.verify_receipts());
+    }
+
+    #[test]
+    fn snapshot_persistence_round_trips_nodes_edges_chain_and_receipts() {
+        let path = std::env::temp_dir().join(format!(
+            "attractor-store-round-trip-{}.json",
+            std::process::id()
+        ));
+        if path.exists() {
+            std::fs::remove_file(&path).unwrap();
+        }
+
+        let mut s = Store::new();
+        let a = s.insert(cell_from("a", "#one")).unwrap();
+        let b = s.insert(cell_from("b", "#two")).unwrap();
+        s.insert(cell_from("a", "#three")).unwrap();
+        s.link(a, b, "references").unwrap();
+        s.attach_receipt(a, receipt_for(a, "persist.v0")).unwrap();
+        s.save_to_path(&path).unwrap();
+
+        let loaded = Store::load_from_path(&path).unwrap();
+        assert_eq!(loaded.len(), 2);
+        assert_eq!(loaded.chain_len(), 2);
+        assert_eq!(loaded.get(&a), s.get(&a));
+        assert_eq!(loaded.provenance(&a).len(), 2);
+        assert_eq!(loaded.relations(&a), s.relations(&a));
+        assert_eq!(loaded.receipts(&a), s.receipts(&a));
+        assert!(loaded.verify_chain());
+        assert!(loaded.verify_receipts());
+
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn loading_tampered_snapshot_fails() {
+        let path = std::env::temp_dir().join(format!(
+            "attractor-store-tampered-{}.json",
+            std::process::id()
+        ));
+        if path.exists() {
+            std::fs::remove_file(&path).unwrap();
+        }
+
+        let mut s = Store::new();
+        s.insert(cell("a")).unwrap();
+        s.insert(cell("b")).unwrap();
+        s.chain[1].prev = Some(ContentHash::of(b"forged"));
+        s.save_to_path(&path).unwrap();
+
+        let err = Store::load_from_path(&path).unwrap_err();
+        assert!(err.to_string().contains("provenance chain"));
+
+        std::fs::remove_file(&path).unwrap();
     }
 }

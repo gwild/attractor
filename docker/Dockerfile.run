@@ -17,9 +17,11 @@ COPY --from=build /src/target/release/attractord /usr/local/bin/attractord
 COPY --from=build /src/target/release/atctl /usr/local/bin/atctl
 
 # /run/attractor is the socket dir; the host bind-mounts it so local agents
-# reach the daemon at <mount>/attractor_api.sock. Created at runtime by the
-# unit's mount, owned by uid 1000 on both sides.
+# reach the daemon at <mount>/attractor_api.sock and the daemon writes its
+# durable store snapshot at <mount>/store.json. Created at runtime by the unit's
+# mount, owned by uid 1000 on both sides.
 USER attractor
 ENV ATTRACTOR_SOCKET_PATH=/run/attractor/attractor_api.sock
+ENV ATTRACTOR_STORE_PATH=/run/attractor/store.json
 
 ENTRYPOINT ["/usr/local/bin/attractord"]

@@ -10,9 +10,9 @@
 # unix-socket-only by default — enabling remote access is a deliberate edit
 # (add `--tcp 127.0.0.1:7533` plus a reviewed exposure plan), never a default.
 #
-# The in-process store is memory-only today; a restart clears matrix state.
-# Persistence (store.data_dir in config.example.yaml) is future work — do not
-# treat daemon state as durable until that lands.
+# The runtime image sets ATTRACTOR_STORE_PATH=/run/attractor/store.json. Because
+# %h/attractor-run is bind-mounted there, matrix state survives container
+# restart; load/save errors fail the daemon instead of starting empty.
 #
 # Why no Requires=docker.service: this is a USER unit; the user manager cannot
 # see system units, so a Requires/After on docker.service would be silently

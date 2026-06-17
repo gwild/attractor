@@ -59,5 +59,12 @@ ATTRACTOR_SOCKET_PATH=~/attractor-run/attractor_api.sock atctl ping
 Trust boundary: the socket dir (`~/attractor-run`) is the access-control
 surface — host filesystem permissions decide who can speak matrix verbs. No
 network listener exists unless an operator adds `--tcp` to the unit, which
-should ride its own reviewed change. Store state is memory-only today
-(restart clears it); persistence is future work.
+should ride its own reviewed change.
+
+Durability: the runtime image sets
+`ATTRACTOR_STORE_PATH=/run/attractor/store.json`, and the user unit bind-mounts
+`~/attractor-run` at `/run/attractor`. Successful `insert`/`link` requests write
+a JSON snapshot before returning success; daemon startup reloads that snapshot
+or starts empty only when the file does not exist yet. Corrupt snapshots and
+load/save failures fail the daemon loudly instead of falling back to an empty
+store.

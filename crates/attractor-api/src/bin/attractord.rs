@@ -5,6 +5,7 @@
 //! ```text
 //!   attractord                       # Unix socket (ATTRACTOR_SOCKET_PATH or proto default)
 //!   attractord --tcp 127.0.0.1:7533  # TCP listener instead (the only option off-Unix)
+//!   attractord --store /run/attractor/store.json
 //! ```
 //!
 //! One transport per process is deliberate, not a shortcut: with the `store`
@@ -24,10 +25,11 @@ use std::time::Instant;
 
 fn usage() -> ExitCode {
     eprintln!(
-        "usage: attractord [--tcp HOST:PORT]\n\
+        "usage: attractord [--tcp HOST:PORT] [--store PATH]\n\
          \n\
          default transport: unix socket (ATTRACTOR_SOCKET_PATH or {})\n\
-         --tcp requires an explicit bind address; there is no implicit 0.0.0.0",
+         --tcp requires an explicit bind address; there is no implicit 0.0.0.0\n\
+         --store enables durable snapshots (or set ATTRACTOR_STORE_PATH)",
         attractor_proto::SOCKET_PATH
     );
     ExitCode::from(2)
@@ -37,28 +39,42 @@ fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
     let mut tcp: Option<String> = None;
+    let mut store_path: Option<String> = None;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
             "--tcp" => {
-                let Some(addr) = args.get(i + 1) else { return usage() };
+                let Some(addr) = args.get(i + 1) else {
+                    return usage();
+                };
                 tcp = Some(addr.clone());
+                i += 2;
+            }
+            "--store" => {
+                let Some(path) = args.get(i + 1) else {
+                    return usage();
+                };
+                store_path = Some(path.clone());
                 i += 2;
             }
             "-h" | "--help" => return usage(),
             _ => return usage(),
         }
     }
+    let store_path = store_path.or_else(attractor_api::store_path);
 
     let start = Instant::now();
     let uptime = move || start.elapsed().as_secs();
 
     let served = match tcp {
-        Some(addr) => {
-            eprintln!("[attractord] serving tcp {addr}");
-            attractor_api::serve_tcp(addr, uptime)
-        }
-        None => serve_local(uptime),
+        Some(addr) => match store_path {
+            Some(path) => serve_tcp_persistent(addr, path, uptime),
+            None => {
+                eprintln!("[attractord] serving tcp {addr}");
+                attractor_api::serve_tcp(addr, uptime)
+            }
+        },
+        None => serve_local(store_path, uptime),
     };
 
     match served {
@@ -75,18 +91,61 @@ fn main() -> ExitCode {
     }
 }
 
+#[cfg(feature = "store")]
+fn serve_tcp_persistent<F>(addr: String, store_path: String, uptime: F) -> std::io::Result<()>
+where
+    F: Fn() -> u64,
+{
+    eprintln!("[attractord] serving tcp {addr} with durable store {store_path}");
+    attractor_api::serve_tcp_persistent(addr, store_path, uptime)
+}
+
+#[cfg(not(feature = "store"))]
+fn serve_tcp_persistent<F>(_addr: String, _store_path: String, _uptime: F) -> std::io::Result<()>
+where
+    F: Fn() -> u64,
+{
+    Err(std::io::Error::other(
+        "durable store requires attractord built with the store feature",
+    ))
+}
+
 #[cfg(unix)]
-fn serve_local<F>(uptime: F) -> std::io::Result<()>
+fn serve_local<F>(store_path: Option<String>, uptime: F) -> std::io::Result<()>
 where
     F: Fn() -> u64,
 {
     let path = attractor_api::socket_path();
-    eprintln!("[attractord] serving unix socket {path}");
-    attractor_api::serve_unix(path, uptime)
+    match store_path {
+        Some(store_path) => serve_local_persistent(path, store_path, uptime),
+        None => {
+            eprintln!("[attractord] serving unix socket {path}");
+            attractor_api::serve_unix(path, uptime)
+        }
+    }
+}
+
+#[cfg(all(unix, feature = "store"))]
+fn serve_local_persistent<F>(path: String, store_path: String, uptime: F) -> std::io::Result<()>
+where
+    F: Fn() -> u64,
+{
+    eprintln!("[attractord] serving unix socket {path} with durable store {store_path}");
+    attractor_api::serve_unix_persistent(path, store_path, uptime)
+}
+
+#[cfg(all(unix, not(feature = "store")))]
+fn serve_local_persistent<F>(_path: String, _store_path: String, _uptime: F) -> std::io::Result<()>
+where
+    F: Fn() -> u64,
+{
+    Err(std::io::Error::other(
+        "durable store requires attractord built with the store feature",
+    ))
 }
 
 #[cfg(not(unix))]
-fn serve_local<F>(_uptime: F) -> std::io::Result<()>
+fn serve_local<F>(_store_path: Option<String>, _uptime: F) -> std::io::Result<()>
 where
     F: Fn() -> u64,
 {
