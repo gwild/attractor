@@ -28,6 +28,7 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::path::Path;
 
 use attractor_core::{content_address, AddressError, Cell, ContentHash, Edge, Frame, SourceRef};
 use attractor_proto::E2eReceipt;
@@ -68,7 +69,7 @@ impl Node {
 /// One link in the provenance chain: the address that was inserted, plus the
 /// hash of the entry before it (`None` at genesis). Hashing an entry commits to
 /// its predecessor, making the chain tamper-evident.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChainEntry {
     /// The content address inserted at this step.
     pub node: ContentHash,
@@ -99,7 +100,7 @@ impl ChainEntry {
 
 /// One link in the receipt audit chain: the stored node address, the attached
 /// receipt's content hash, and the previous receipt entry hash.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReceiptChainEntry {
     /// The stored node whose receipt was attached.
     pub node: ContentHash,
@@ -152,6 +153,99 @@ pub enum StoreError {
     },
     /// The receipt payload could not be content-addressed.
     ReceiptAddress(serde_json::Error),
+}
+
+/// A durable store snapshot failed to load or save.
+#[derive(Debug)]
+pub enum PersistenceError {
+    /// Filesystem operation failed.
+    Io(std::io::Error),
+    /// JSON encoding or decoding failed.
+    Json(serde_json::Error),
+    /// Persisted node content could not be content-addressed.
+    Address(AddressError),
+    /// A stored node was keyed by the wrong content address.
+    AddressMismatch {
+        /// Address recorded in the dump.
+        recorded: ContentHash,
+        /// Address recomputed from the serialized node.
+        computed: ContentHash,
+    },
+    /// A persisted edge references an address absent from the node set.
+    DanglingEdge(Edge),
+    /// Persisted relation graph contains a cycle.
+    GraphCyclic,
+    /// Persisted chain metadata does not verify after load.
+    ChainInvalid,
+    /// Persisted receipt metadata does not verify after load.
+    ReceiptsInvalid,
+}
+
+impl fmt::Display for PersistenceError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Io(e) => write!(f, "store persistence I/O failed: {e}"),
+            Self::Json(e) => write!(f, "store persistence JSON failed: {e}"),
+            Self::Address(e) => write!(f, "store dump node address failed: {e}"),
+            Self::AddressMismatch { recorded, computed } => write!(
+                f,
+                "store dump address mismatch: recorded {recorded}, computed {computed}"
+            ),
+            Self::DanglingEdge(edge) => write!(
+                f,
+                "store dump edge references missing endpoint: {} -> {} ({})",
+                edge.from, edge.to, edge.kind
+            ),
+            Self::GraphCyclic => f.write_str("store dump relation graph contains a cycle"),
+            Self::ChainInvalid => f.write_str("store dump chain failed verification"),
+            Self::ReceiptsInvalid => f.write_str("store dump receipts failed verification"),
+        }
+    }
+}
+
+impl std::error::Error for PersistenceError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io(e) => Some(e),
+            Self::Json(e) => Some(e),
+            Self::Address(e) => Some(e),
+            Self::AddressMismatch { .. }
+            | Self::DanglingEdge(_)
+            | Self::GraphCyclic
+            | Self::ChainInvalid
+            | Self::ReceiptsInvalid => None,
+        }
+    }
+}
+
+impl From<std::io::Error> for PersistenceError {
+    fn from(e: std::io::Error) -> Self {
+        Self::Io(e)
+    }
+}
+
+impl From<AddressError> for PersistenceError {
+    fn from(e: AddressError) -> Self {
+        Self::Address(e)
+    }
+}
+
+impl From<serde_json::Error> for PersistenceError {
+    fn from(e: serde_json::Error) -> Self {
+        Self::Json(e)
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct StoreDump {
+    nodes: Vec<(ContentHash, Node)>,
+    edges: Vec<Edge>,
+    chain: Vec<ChainEntry>,
+    head: Option<ContentHash>,
+    provenance: Vec<(ContentHash, Vec<SourceRef>)>,
+    receipts: Vec<(ContentHash, Vec<E2eReceipt>)>,
+    receipt_chain: Vec<ReceiptChainEntry>,
+    receipt_head: Option<ContentHash>,
 }
 
 impl fmt::Display for StoreError {
@@ -210,6 +304,111 @@ impl Store {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Load a store from a JSON snapshot.
+    ///
+    /// # Errors
+    /// Returns [`PersistenceError`] if the file cannot be read, decoded, or if
+    /// the decoded store fails content-address, chain, edge, or receipt checks.
+    pub fn load_json_path(path: impl AsRef<Path>) -> Result<Self, PersistenceError> {
+        let bytes = std::fs::read(path)?;
+        Self::from_json_slice(&bytes)
+    }
+
+    /// Save a store as a JSON snapshot using an atomic rename into place.
+    ///
+    /// # Errors
+    /// Returns [`PersistenceError`] if the parent directory cannot be created,
+    /// JSON cannot be encoded, or the snapshot cannot be written/renamed.
+    pub fn save_json_path(&self, path: impl AsRef<Path>) -> Result<(), PersistenceError> {
+        let path = path.as_ref();
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let bytes = serde_json::to_vec_pretty(&self.dump())?;
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&tmp, bytes)?;
+        std::fs::rename(tmp, path)?;
+        Ok(())
+    }
+
+    fn from_json_slice(bytes: &[u8]) -> Result<Self, PersistenceError> {
+        let dump: StoreDump = serde_json::from_slice(bytes)?;
+        Self::from_dump(dump)
+    }
+
+    fn from_dump(dump: StoreDump) -> Result<Self, PersistenceError> {
+        let mut store = Self::new();
+        for (recorded, node) in dump.nodes {
+            let computed = node.address()?;
+            if recorded != computed {
+                return Err(PersistenceError::AddressMismatch { recorded, computed });
+            }
+            let idx = store.graph.add_node(recorded);
+            store.index.insert(recorded, idx);
+            store.nodes.insert(recorded, node);
+        }
+        for edge in dump.edges {
+            let Some(&from_idx) = store.index.get(&edge.from) else {
+                return Err(PersistenceError::DanglingEdge(edge));
+            };
+            let Some(&to_idx) = store.index.get(&edge.to) else {
+                return Err(PersistenceError::DanglingEdge(edge));
+            };
+            store.graph.add_edge(from_idx, to_idx, edge.kind);
+        }
+        store.chain = dump.chain;
+        store.head = dump.head;
+        store.provenance = dump.provenance.into_iter().collect();
+        store.receipts = dump.receipts.into_iter().collect();
+        store.receipt_chain = dump.receipt_chain;
+        store.receipt_head = dump.receipt_head;
+        if is_cyclic_directed(&store.graph) {
+            return Err(PersistenceError::GraphCyclic);
+        }
+        if !store.verify_chain() {
+            return Err(PersistenceError::ChainInvalid);
+        }
+        if !store.verify_receipts() {
+            return Err(PersistenceError::ReceiptsInvalid);
+        }
+        Ok(store)
+    }
+
+    fn dump(&self) -> StoreDump {
+        let nodes = self
+            .nodes
+            .iter()
+            .map(|(addr, node)| (*addr, node.clone()))
+            .collect();
+        let edges = self
+            .graph
+            .edge_references()
+            .map(|edge| Edge {
+                from: self.graph[edge.source()],
+                to: self.graph[edge.target()],
+                kind: edge.weight().clone(),
+            })
+            .collect();
+        StoreDump {
+            nodes,
+            edges,
+            chain: self.chain.clone(),
+            head: self.head,
+            provenance: self
+                .provenance
+                .iter()
+                .map(|(addr, sources)| (*addr, sources.clone()))
+                .collect(),
+            receipts: self
+                .receipts
+                .iter()
+                .map(|(addr, receipts)| (*addr, receipts.clone()))
+                .collect(),
+            receipt_chain: self.receipt_chain.clone(),
+            receipt_head: self.receipt_head,
+        }
     }
 
     /// Insert a node, returning its content address.
@@ -504,6 +703,7 @@ mod tests {
     use attractor_core::{Cell, ContentHash, Frame, Primitive, SourceRef};
     use attractor_proto::{ContentHashHex, E2eReceipt};
     use std::collections::BTreeMap;
+    use std::path::PathBuf;
 
     fn cell(text: &str) -> Node {
         Node::Cell(Cell {
@@ -938,5 +1138,40 @@ mod tests {
         s.receipt_chain[1].prev = Some(ContentHash::of(b"forged"));
         assert!(!s.verify_receipt_chain(), "breaking a receipt prev link must fail");
         assert!(!s.verify_receipts());
+    }
+
+    #[test]
+    fn json_persistence_round_trips_nodes_edges_and_receipts() {
+        let path = temp_store_path("json-persistence-round-trip");
+        let mut s = Store::new();
+        let a = s.insert(cell_from("a", "#one")).unwrap();
+        let b = s.insert(cell_from("b", "#two")).unwrap();
+        s.link(a, b, "references").unwrap();
+        s.attach_receipt(a, receipt_for(a, "persist.v0")).unwrap();
+        let head = s.head();
+
+        s.save_json_path(&path).unwrap();
+        let loaded = Store::load_json_path(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+
+        assert_eq!(loaded.len(), 2);
+        assert_eq!(loaded.chain_len(), 2);
+        assert_eq!(loaded.head(), head);
+        assert!(loaded.verify_chain());
+        assert!(loaded.verify_receipts());
+        assert_eq!(loaded.get(&a), s.get(&a));
+        assert_eq!(loaded.relations(&a), s.relations(&a));
+        assert_eq!(loaded.provenance(&a), s.provenance(&a));
+        assert_eq!(loaded.receipts(&a), s.receipts(&a));
+    }
+
+    fn temp_store_path(label: &str) -> PathBuf {
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "attractor-store-{label}-{}-{}.json",
+            std::process::id(),
+            ContentHash::of(label.as_bytes()).to_hex()
+        ));
+        path
     }
 }

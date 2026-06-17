@@ -59,5 +59,6 @@ ATTRACTOR_SOCKET_PATH=~/attractor-run/attractor_api.sock atctl ping
 Trust boundary: the socket dir (`~/attractor-run`) is the access-control
 surface — host filesystem permissions decide who can speak matrix verbs. No
 network listener exists unless an operator adds `--tcp` to the unit, which
-should ride its own reviewed change. Store state is memory-only today
-(restart clears it); persistence is future work.
+should ride its own reviewed change. The runtime persists store state as
+`~/attractor-run/store.json` via `ATTRACTOR_STORE_PATH`, so `docker restart
+attractor` reloads prior nodes, edges, provenance, and receipt metadata.

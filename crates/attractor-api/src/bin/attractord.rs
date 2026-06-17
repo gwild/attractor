@@ -56,7 +56,7 @@ fn main() -> ExitCode {
     let served = match tcp {
         Some(addr) => {
             eprintln!("[attractord] serving tcp {addr}");
-            attractor_api::serve_tcp(addr, uptime)
+            serve_tcp(addr, uptime)
         }
         None => serve_local(uptime),
     };
@@ -75,6 +75,24 @@ fn main() -> ExitCode {
     }
 }
 
+#[cfg(feature = "store")]
+fn serve_tcp<F>(addr: String, uptime: F) -> std::io::Result<()>
+where
+    F: Fn() -> u64,
+{
+    let store_path = attractor_api::store_path();
+    eprintln!("[attractord] durable store {store_path}");
+    attractor_api::serve_tcp_persistent(addr, uptime, store_path)
+}
+
+#[cfg(not(feature = "store"))]
+fn serve_tcp<F>(addr: String, uptime: F) -> std::io::Result<()>
+where
+    F: Fn() -> u64,
+{
+    attractor_api::serve_tcp(addr, uptime)
+}
+
 #[cfg(unix)]
 fn serve_local<F>(uptime: F) -> std::io::Result<()>
 where
@@ -82,6 +100,24 @@ where
 {
     let path = attractor_api::socket_path();
     eprintln!("[attractord] serving unix socket {path}");
+    serve_unix(path, uptime)
+}
+
+#[cfg(all(unix, feature = "store"))]
+fn serve_unix<F>(path: String, uptime: F) -> std::io::Result<()>
+where
+    F: Fn() -> u64,
+{
+    let store_path = attractor_api::store_path();
+    eprintln!("[attractord] durable store {store_path}");
+    attractor_api::serve_unix_persistent(path, uptime, store_path)
+}
+
+#[cfg(all(unix, not(feature = "store")))]
+fn serve_unix<F>(path: String, uptime: F) -> std::io::Result<()>
+where
+    F: Fn() -> u64,
+{
     attractor_api::serve_unix(path, uptime)
 }
 

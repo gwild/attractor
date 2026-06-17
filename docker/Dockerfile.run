@@ -21,5 +21,6 @@ COPY --from=build /src/target/release/atctl /usr/local/bin/atctl
 # unit's mount, owned by uid 1000 on both sides.
 USER attractor
 ENV ATTRACTOR_SOCKET_PATH=/run/attractor/attractor_api.sock
+ENV ATTRACTOR_STORE_PATH=/run/attractor/store.json
 
 ENTRYPOINT ["/usr/local/bin/attractord"]
