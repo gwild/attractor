@@ -41,7 +41,10 @@ pub const ENV_STORE_PATH: &str = "ATTRACTOR_STORE_PATH";
 /// to the proto default.
 #[must_use]
 pub fn socket_path() -> String {
-    resolve(std::env::var(ENV_SOCKET_PATH).ok(), attractor_proto::SOCKET_PATH)
+    resolve(
+        std::env::var(ENV_SOCKET_PATH).ok(),
+        attractor_proto::SOCKET_PATH,
+    )
 }
 
 /// Resolve the TCP bind/connect address from `$ATTRACTOR_TCP_ADDR`, falling back
@@ -71,18 +74,12 @@ fn store_path() -> Option<PathBuf> {
 
 #[cfg(feature = "store")]
 fn load_store(path: Option<&PathBuf>) -> std::io::Result<Store> {
-    match path {
-        Some(path) => Store::load_json(path),
-        None => Ok(Store::new()),
-    }
+    path.map_or_else(|| Ok(Store::new()), Store::load_json)
 }
 
 #[cfg(feature = "store")]
 fn save_store(path: Option<&PathBuf>, store: &Store) -> std::io::Result<()> {
-    match path {
-        Some(path) => store.save_json(path),
-        None => Ok(()),
-    }
+    path.map_or(Ok(()), |path| store.save_json(path))
 }
 
 /// Payload for a [`RequestKind::Status`] reply.
@@ -147,7 +144,7 @@ fn hash_hex(hash: &ContentHash) -> ContentHashHex {
 }
 
 #[cfg(feature = "store")]
-fn store_error_message(err: StoreError) -> String {
+fn store_error_message(err: &StoreError) -> String {
     err.to_string()
 }
 
@@ -185,8 +182,9 @@ pub fn dispatch_with_store(req: &ApiRequest, uptime_secs: u64, store: &mut Store
             store_attached: true,
         }),
         RequestKind::Get { address } => match hash_core(address) {
-            Ok(addr) => match store.get(&addr) {
-                Some(node) => match serde_json::to_value(node) {
+            Ok(addr) => store.get(&addr).map_or_else(
+                || ApiResponse::error(format!("node {} is not in the store", address.as_str())),
+                |node| match serde_json::to_value(node) {
                     Ok(node_json) => {
                         let wire_addr = hash_hex(&addr);
                         let provenance_refs = provenance_wire(store, &addr);
@@ -202,11 +200,7 @@ pub fn dispatch_with_store(req: &ApiRequest, uptime_secs: u64, store: &mut Store
                     }
                     Err(e) => ApiResponse::error(format!("node serialization failed: {e}")),
                 },
-                None => ApiResponse::error(format!(
-                    "node {} is not in the store",
-                    address.as_str()
-                )),
-            },
+            ),
             Err(e) => ApiResponse::error(format!("invalid content address: {e}")),
         },
         RequestKind::Insert { node } => match serde_json::from_value::<Node>(node.clone()) {
@@ -214,7 +208,7 @@ pub fn dispatch_with_store(req: &ApiRequest, uptime_secs: u64, store: &mut Store
                 Ok(addr) => ApiResponse::ok(InsertData {
                     address: hash_hex(&addr),
                 }),
-                Err(e) => ApiResponse::error(store_error_message(e)),
+                Err(e) => ApiResponse::error(store_error_message(&e)),
             },
             Err(e) => ApiResponse::error(format!("invalid node payload: {e}")),
         },
@@ -225,9 +219,11 @@ pub fn dispatch_with_store(req: &ApiRequest, uptime_secs: u64, store: &mut Store
                     to: hash_hex(&edge.to),
                     kind: edge.kind,
                 }),
-                Err(e) => ApiResponse::error(store_error_message(e)),
+                Err(e) => ApiResponse::error(store_error_message(&e)),
             },
-            (Err(e), _) | (_, Err(e)) => ApiResponse::error(format!("invalid content address: {e}")),
+            (Err(e), _) | (_, Err(e)) => {
+                ApiResponse::error(format!("invalid content address: {e}"))
+            }
         },
         RequestKind::Snapshot => ApiResponse::ok(SnapshotData {
             node_count: store.len(),
@@ -274,8 +270,35 @@ pub fn handle_line(line: &str, uptime_secs: u64) -> String {
 #[cfg(feature = "store")]
 #[must_use]
 pub fn handle_line(line: &str, uptime_secs: u64, store: &mut Store) -> String {
+    handle_line_inner(line, uptime_secs, store, None)
+}
+
+#[cfg(feature = "store")]
+fn handle_line_inner(
+    line: &str,
+    uptime_secs: u64,
+    store: &mut Store,
+    store_path: Option<&PathBuf>,
+) -> String {
     let resp = match serde_json::from_str::<ApiRequest>(line) {
-        Ok(req) => dispatch_with_store(&req, uptime_secs, store),
+        Ok(req) => {
+            let should_persist = matches!(
+                req.kind,
+                RequestKind::Insert { .. } | RequestKind::Link { .. }
+            );
+            let resp = dispatch_with_store(&req, uptime_secs, store);
+            if should_persist && matches!(resp, ApiResponse::Ok { .. }) {
+                if let Err(e) = save_store(store_path, store) {
+                    return serde_json::to_string(&ApiResponse::error(format!(
+                        "store persistence failed: {e}"
+                    )))
+                    .unwrap_or_else(|_| {
+                        r#"{"status":"error","message":"response serialization failed"}"#.to_owned()
+                    });
+                }
+            }
+            resp
+        }
         Err(e) => ApiResponse::error(format!("malformed request: {e}")),
     };
     serde_json::to_string(&resp).unwrap_or_else(|_| {
@@ -343,6 +366,10 @@ where
 /// # Errors
 /// Currently never returns `Err`; the result mirrors [`serve_tcp`].
 #[cfg(feature = "store")]
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "owning the bound listener pins it to the serving thread"
+)]
 pub fn serve_tcp_on<F>(listener: TcpListener, uptime: F) -> std::io::Result<()>
 where
     F: Fn() -> u64,
@@ -352,10 +379,8 @@ where
     for stream in listener.incoming() {
         match stream {
             Ok(s) => {
-                if let Err(e) = serve_one(s, &uptime, &mut store) {
+                if let Err(e) = serve_one(s, &uptime, &mut store, store_path.as_ref()) {
                     eprintln!("[attractor-api] tcp connection error: {e}");
-                } else {
-                    save_store(store_path.as_ref(), &store)?;
                 }
             }
             Err(e) => eprintln!("[attractor-api] tcp accept error: {e}"),
@@ -390,7 +415,10 @@ where
 /// # Errors
 /// Currently never returns `Err`; the result mirrors [`serve_unix`].
 #[cfg(all(unix, not(feature = "store")))]
-pub fn serve_unix_on<F>(listener: std::os::unix::net::UnixListener, uptime: F) -> std::io::Result<()>
+pub fn serve_unix_on<F>(
+    listener: std::os::unix::net::UnixListener,
+    uptime: F,
+) -> std::io::Result<()>
 where
     F: Fn() -> u64,
 {
@@ -434,7 +462,14 @@ where
 /// # Errors
 /// Currently never returns `Err`; the result mirrors [`serve_unix`].
 #[cfg(all(unix, feature = "store"))]
-pub fn serve_unix_on<F>(listener: std::os::unix::net::UnixListener, uptime: F) -> std::io::Result<()>
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "owning the bound listener pins it to the serving thread"
+)]
+pub fn serve_unix_on<F>(
+    listener: std::os::unix::net::UnixListener,
+    uptime: F,
+) -> std::io::Result<()>
 where
     F: Fn() -> u64,
 {
@@ -443,10 +478,8 @@ where
     for stream in listener.incoming() {
         match stream {
             Ok(s) => {
-                if let Err(e) = serve_one(s, &uptime, &mut store) {
+                if let Err(e) = serve_one(s, &uptime, &mut store, store_path.as_ref()) {
                     eprintln!("[attractor-api] unix connection error: {e}");
-                } else {
-                    save_store(store_path.as_ref(), &store)?;
                 }
             }
             Err(e) => eprintln!("[attractor-api] unix accept error: {e}"),
@@ -474,7 +507,12 @@ where
 }
 
 #[cfg(feature = "store")]
-fn serve_one<S, F>(stream: S, uptime: &F, store: &mut Store) -> std::io::Result<()>
+fn serve_one<S, F>(
+    stream: S,
+    uptime: &F,
+    store: &mut Store,
+    store_path: Option<&PathBuf>,
+) -> std::io::Result<()>
 where
     S: std::io::Read + Write,
     F: Fn() -> u64,
@@ -484,7 +522,7 @@ where
     if reader.read_line(&mut line)? == 0 {
         return Ok(());
     }
-    let resp = handle_line(line.trim_end(), uptime(), store);
+    let resp = handle_line_inner(line.trim_end(), uptime(), store, store_path);
     let inner = reader.get_mut();
     inner.write_all(resp.as_bytes())?;
     inner.write_all(b"\n")?;
@@ -498,13 +536,19 @@ mod tests {
 
     #[test]
     fn resolve_prefers_nonempty_override() {
-        assert_eq!(resolve(Some("/custom.sock".into()), "/default.sock"), "/custom.sock");
+        assert_eq!(
+            resolve(Some("/custom.sock".into()), "/default.sock"),
+            "/custom.sock"
+        );
     }
 
     #[test]
     fn resolve_falls_back_when_absent_or_blank() {
         assert_eq!(resolve(None, "/default.sock"), "/default.sock");
-        assert_eq!(resolve(Some("   ".into()), "/default.sock"), "/default.sock");
+        assert_eq!(
+            resolve(Some("   ".into()), "/default.sock"),
+            "/default.sock"
+        );
     }
 
     #[test]
@@ -528,7 +572,10 @@ mod tests {
 
     #[test]
     fn dispatch_echoes_correlation_id() {
-        let req = ApiRequest { id: Some(7), kind: RequestKind::Ping };
+        let req = ApiRequest {
+            id: Some(7),
+            kind: RequestKind::Ping,
+        };
         match dispatch(&req, 0) {
             ApiResponse::Ok { id, .. } => assert_eq!(id, Some(7)),
             other => panic!("expected Ok with id, got {other:?}"),
@@ -582,8 +629,8 @@ mod tests {
 
     #[cfg(feature = "store")]
     mod store_tests {
-        use crate::dispatch_with_store;
         use crate::dispatch;
+        use crate::dispatch_with_store;
         use attractor_core::{Cell, ContentHash, Primitive, SourceRef};
         use attractor_proto::{ApiRequest, ApiResponse, RequestKind};
         use attractor_store::{Node, Store};
@@ -610,8 +657,7 @@ mod tests {
             match dispatch_with_store(&get_req, 0, &mut store) {
                 ApiResponse::Ok { data, .. } => {
                     assert_eq!(
-                        data["receipt"]["transform_id"],
-                        "attractor.store.get.v0",
+                        data["receipt"]["transform_id"], "attractor.store.get.v0",
                         "full data: {data}"
                     );
                     assert!(data["node"].is_object(), "full data: {data}");
@@ -670,10 +716,7 @@ mod tests {
 
         #[test]
         fn dispatch_without_store_instance_errors_matrix_verbs() {
-            match dispatch(
-                &ApiRequest::new(RequestKind::Snapshot),
-                0,
-            ) {
+            match dispatch(&ApiRequest::new(RequestKind::Snapshot), 0) {
                 ApiResponse::Error { message, .. } => {
                     assert!(message.contains("dispatch_with_store"));
                 }
