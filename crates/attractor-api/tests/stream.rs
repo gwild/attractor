@@ -85,7 +85,9 @@ mod unix_socket {
         std::thread::spawn(move || attractor_api::serve_unix_on(listener, || 0));
 
         let mut stream = UnixStream::connect(&path).expect("connect");
-        stream.write_all(b"{\"kind\":{\"op\":\"ping\"}}\n").expect("write");
+        stream
+            .write_all(b"{\"kind\":{\"op\":\"ping\"}}\n")
+            .expect("write");
         stream.flush().expect("flush");
         let mut reader = BufReader::new(stream);
         let mut resp = String::new();
@@ -99,7 +101,16 @@ mod unix_socket {
 mod store_over_wire {
     use super::*;
     use attractor_core::{Cell, ContentHash, Primitive, SourceRef};
+    use attractor_proto::ContentHashHex;
     use attractor_store::Node;
+    use std::path::PathBuf;
+
+    fn spawn_tcp_server_persistent(path: PathBuf) -> SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind port 0");
+        let addr = listener.local_addr().expect("local_addr");
+        std::thread::spawn(move || attractor_api::serve_tcp_on_persistent(listener, || 0, path));
+        addr
+    }
 
     fn insert_line(text: &str, origin: &str) -> String {
         let node = Node::Cell(Cell {
@@ -110,10 +121,8 @@ mod store_over_wire {
             },
         });
         let node_json = serde_json::to_value(&node).expect("serialize node");
-        serde_json::to_string(
-            &serde_json::json!({"kind": {"op": "insert", "node": node_json}}),
-        )
-        .expect("serialize request")
+        serde_json::to_string(&serde_json::json!({"kind": {"op": "insert", "node": node_json}}))
+            .expect("serialize request")
     }
 
     fn data_of(resp: ApiResponse) -> serde_json::Value {
@@ -121,6 +130,23 @@ mod store_over_wire {
             ApiResponse::Ok { data, .. } => serde_json::to_value(data).expect("data to value"),
             other => panic!("expected Ok, got {other:?}"),
         }
+    }
+
+    fn get_line(address: &str) -> String {
+        serde_json::to_string(&serde_json::json!({"kind": {"op": "get", "address": address}}))
+            .expect("serialize get")
+    }
+
+    fn link_line(from: &str, to: &str, kind: &str) -> String {
+        serde_json::to_string(
+            &serde_json::json!({"kind": {"op": "link", "from": from, "to": to, "kind": kind}}),
+        )
+        .expect("serialize link")
+    }
+
+    fn relations_line(address: &str) -> String {
+        serde_json::to_string(&serde_json::json!({"kind": {"op": "relations", "address": address}}))
+            .expect("serialize relations")
     }
 
     #[test]
@@ -132,23 +158,65 @@ mod store_over_wire {
 
         let a = data_of(round_trip(addr, &insert_line("fact", "#general")));
         let b = data_of(round_trip(addr, &insert_line("fact", "#issues")));
-        let addr_a = a["address"].as_str().expect("insert returns address").to_owned();
-        let addr_b = b["address"].as_str().expect("insert returns address").to_owned();
+        let addr_a = a["address"]
+            .as_str()
+            .expect("insert returns address")
+            .to_owned();
+        let addr_b = b["address"]
+            .as_str()
+            .expect("insert returns address")
+            .to_owned();
         assert_eq!(addr_a, addr_b, "same value must converge over the wire");
 
-        let get = data_of(round_trip(
-            addr,
-            &serde_json::to_string(
-                &serde_json::json!({"kind": {"op": "get", "address": addr_a}}),
-            )
-            .expect("serialize get"),
-        ));
-        let refs = get["provenance_refs"].as_array().expect("provenance_refs array");
+        let get = data_of(round_trip(addr, &get_line(&addr_a)));
+        let refs = get["provenance_refs"]
+            .as_array()
+            .expect("provenance_refs array");
         assert_eq!(refs.len(), 2, "both observations must be in provenance");
 
         let snap = data_of(round_trip(addr, r#"{"kind":{"op":"snapshot"}}"#));
         assert_eq!(snap["node_count"].as_u64(), Some(1));
         assert_eq!(snap["chain_len"].as_u64(), Some(1));
         assert_eq!(snap["chain_intact"].as_bool(), Some(true));
+    }
+
+    #[test]
+    fn persistent_store_survives_new_server_instance() {
+        let dir =
+            std::env::temp_dir().join(format!("attractor-api-persist-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let path = dir.join("store.json");
+
+        let first = spawn_tcp_server_persistent(path.clone());
+        let a = data_of(round_trip(first, &insert_line("persist-a", "#general")));
+        let b = data_of(round_trip(first, &insert_line("persist-b", "#general")));
+        let addr_a = a["address"]
+            .as_str()
+            .expect("insert returns address")
+            .to_owned();
+        let addr_b = b["address"]
+            .as_str()
+            .expect("insert returns address")
+            .to_owned();
+        ContentHashHex::new(addr_a.clone()).expect("address is valid hex");
+        ContentHashHex::new(addr_b.clone()).expect("address is valid hex");
+        let _ = data_of(round_trip(
+            first,
+            &link_line(&addr_a, &addr_b, "references"),
+        ));
+
+        let second = spawn_tcp_server_persistent(path.clone());
+        let snap = data_of(round_trip(second, r#"{"kind":{"op":"snapshot"}}"#));
+        assert_eq!(snap["node_count"].as_u64(), Some(2));
+        assert_eq!(snap["chain_len"].as_u64(), Some(2));
+        assert_eq!(snap["chain_intact"].as_bool(), Some(true));
+
+        let get = data_of(round_trip(second, &get_line(&addr_a)));
+        assert_eq!(get["address"].as_str(), Some(addr_a.as_str()));
+        let rel = data_of(round_trip(second, &relations_line(&addr_a)));
+        assert_eq!(rel["edges"].as_array().expect("edges array").len(), 1);
+
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

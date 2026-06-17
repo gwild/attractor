@@ -18,6 +18,10 @@
 //! explicitly — the daemon never falls back to the `0.0.0.0` default of
 //! [`attractor_api::tcp_addr`], so an operator cannot end up with an
 //! all-interfaces listener without writing the address out.
+//!
+//! With the `store` feature, daemon state is snapshotted to
+//! `ATTRACTOR_STORE_PATH` (default `/run/attractor/store.json`) so a container
+//! restart reloads the matrix before accepting new requests.
 
 use std::process::ExitCode;
 use std::time::Instant;
@@ -41,7 +45,9 @@ fn main() -> ExitCode {
     while i < args.len() {
         match args[i].as_str() {
             "--tcp" => {
-                let Some(addr) = args.get(i + 1) else { return usage() };
+                let Some(addr) = args.get(i + 1) else {
+                    return usage();
+                };
                 tcp = Some(addr.clone());
                 i += 2;
             }
@@ -56,7 +62,16 @@ fn main() -> ExitCode {
     let served = match tcp {
         Some(addr) => {
             eprintln!("[attractord] serving tcp {addr}");
-            attractor_api::serve_tcp(addr, uptime)
+            #[cfg(feature = "store")]
+            {
+                let store_path = attractor_api::store_path();
+                eprintln!("[attractord] durable store {store_path}");
+                attractor_api::serve_tcp_persistent(addr, uptime, store_path)
+            }
+            #[cfg(not(feature = "store"))]
+            {
+                attractor_api::serve_tcp(addr, uptime)
+            }
         }
         None => serve_local(uptime),
     };
@@ -82,7 +97,16 @@ where
 {
     let path = attractor_api::socket_path();
     eprintln!("[attractord] serving unix socket {path}");
-    attractor_api::serve_unix(path, uptime)
+    #[cfg(feature = "store")]
+    {
+        let store_path = attractor_api::store_path();
+        eprintln!("[attractord] durable store {store_path}");
+        attractor_api::serve_unix_persistent(path, uptime, store_path)
+    }
+    #[cfg(not(feature = "store"))]
+    {
+        attractor_api::serve_unix(path, uptime)
+    }
 }
 
 #[cfg(not(unix))]
