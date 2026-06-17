@@ -16,6 +16,8 @@ use attractor_proto::{ApiRequest, ApiResponse, RequestKind};
 use serde::Serialize;
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, ToSocketAddrs};
+#[cfg(feature = "store")]
+use std::path::PathBuf;
 
 #[cfg(feature = "store")]
 use attractor_core::ContentHash;
@@ -31,6 +33,9 @@ use attractor_store::{Node, Store, StoreError};
 pub const ENV_SOCKET_PATH: &str = "ATTRACTOR_SOCKET_PATH";
 /// Environment variable overriding the TCP bind/connect address.
 pub const ENV_TCP_ADDR: &str = "ATTRACTOR_TCP_ADDR";
+/// Environment variable naming the JSON file used for store persistence.
+#[cfg(feature = "store")]
+pub const ENV_STORE_PATH: &str = "ATTRACTOR_STORE_PATH";
 
 /// Resolve the control socket path from `$ATTRACTOR_SOCKET_PATH`, falling back
 /// to the proto default.
@@ -52,6 +57,31 @@ fn resolve(override_val: Option<String>, default: &str) -> String {
     match override_val {
         Some(v) if !v.trim().is_empty() => v,
         _ => default.to_owned(),
+    }
+}
+
+#[cfg(feature = "store")]
+fn store_path() -> Option<PathBuf> {
+    std::env::var(ENV_STORE_PATH)
+        .ok()
+        .map(|path| path.trim().to_owned())
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+}
+
+#[cfg(feature = "store")]
+fn load_store(path: Option<&PathBuf>) -> std::io::Result<Store> {
+    match path {
+        Some(path) => Store::load_json(path),
+        None => Ok(Store::new()),
+    }
+}
+
+#[cfg(feature = "store")]
+fn save_store(path: Option<&PathBuf>, store: &Store) -> std::io::Result<()> {
+    match path {
+        Some(path) => store.save_json(path),
+        None => Ok(()),
     }
 }
 
@@ -317,12 +347,15 @@ pub fn serve_tcp_on<F>(listener: TcpListener, uptime: F) -> std::io::Result<()>
 where
     F: Fn() -> u64,
 {
-    let mut store = Store::new();
+    let store_path = store_path();
+    let mut store = load_store(store_path.as_ref())?;
     for stream in listener.incoming() {
         match stream {
             Ok(s) => {
                 if let Err(e) = serve_one(s, &uptime, &mut store) {
                     eprintln!("[attractor-api] tcp connection error: {e}");
+                } else {
+                    save_store(store_path.as_ref(), &store)?;
                 }
             }
             Err(e) => eprintln!("[attractor-api] tcp accept error: {e}"),
@@ -405,12 +438,15 @@ pub fn serve_unix_on<F>(listener: std::os::unix::net::UnixListener, uptime: F) -
 where
     F: Fn() -> u64,
 {
-    let mut store = Store::new();
+    let store_path = store_path();
+    let mut store = load_store(store_path.as_ref())?;
     for stream in listener.incoming() {
         match stream {
             Ok(s) => {
                 if let Err(e) = serve_one(s, &uptime, &mut store) {
                     eprintln!("[attractor-api] unix connection error: {e}");
+                } else {
+                    save_store(store_path.as_ref(), &store)?;
                 }
             }
             Err(e) => eprintln!("[attractor-api] unix accept error: {e}"),

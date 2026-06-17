@@ -28,6 +28,8 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::io;
+use std::path::Path;
 
 use attractor_core::{content_address, AddressError, Cell, ContentHash, Edge, Frame, SourceRef};
 use attractor_proto::E2eReceipt;
@@ -205,11 +207,73 @@ pub struct Store {
     receipt_head: Option<ContentHash>,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+struct PersistedReceipt {
+    node: ContentHash,
+    receipt: E2eReceipt,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct PersistedProvenance {
+    node: ContentHash,
+    sources: Vec<SourceRef>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct StoreImage {
+    version: u8,
+    nodes: Vec<Node>,
+    edges: Vec<Edge>,
+    provenance: Vec<PersistedProvenance>,
+    receipts: Vec<PersistedReceipt>,
+}
+
 impl Store {
     /// An empty store.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Load a store snapshot from JSON. A missing path is an empty store.
+    ///
+    /// The loader replays normal [`Store::insert`], [`Store::link`], and
+    /// [`Store::attach_receipt`] operations instead of trusting serialized
+    /// private indexes. Corrupt or inconsistent files fail loudly.
+    ///
+    /// # Errors
+    /// Returns filesystem errors, JSON parse errors, or replay validation
+    /// errors as [`io::Error`].
+    pub fn load_json(path: impl AsRef<Path>) -> io::Result<Self> {
+        let path = path.as_ref();
+        if !path.exists() {
+            return Ok(Self::new());
+        }
+        let file = std::fs::File::open(path)?;
+        let image: StoreImage = serde_json::from_reader(file)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        image.into_store()
+    }
+
+    /// Atomically save a store snapshot as JSON.
+    ///
+    /// # Errors
+    /// Returns filesystem or JSON serialization errors.
+    pub fn save_json(&self, path: impl AsRef<Path>) -> io::Result<()> {
+        let path = path.as_ref();
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let image = StoreImage::from_store(self);
+        let tmp_path = path.with_extension("json.tmp");
+        {
+            let mut file = std::fs::File::create(&tmp_path)?;
+            serde_json::to_writer_pretty(&mut file, &image)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+            std::io::Write::write_all(&mut file, b"\n")?;
+            std::io::Write::flush(&mut file)?;
+        }
+        std::fs::rename(tmp_path, path)
     }
 
     /// Insert a node, returning its content address.
@@ -496,6 +560,110 @@ impl Store {
                     })
             })
     }
+}
+
+impl StoreImage {
+    fn from_store(store: &Store) -> Self {
+        let nodes = store
+            .chain
+            .iter()
+            .filter_map(|entry| store.nodes.get(&entry.node).cloned())
+            .collect();
+        let edges = store
+            .graph
+            .edge_references()
+            .map(|edge| Edge {
+                from: store.graph[edge.source()],
+                to: store.graph[edge.target()],
+                kind: edge.weight().clone(),
+            })
+            .collect();
+        let receipts = store
+            .receipt_chain
+            .iter()
+            .filter_map(|entry| {
+                store
+                    .receipts
+                    .get(&entry.node)
+                    .and_then(|bucket| {
+                        bucket
+                            .iter()
+                            .find(|receipt| {
+                                content_address(*receipt).is_ok_and(|hash| hash == entry.receipt)
+                            })
+                            .cloned()
+                    })
+                    .map(|receipt| PersistedReceipt {
+                        node: entry.node,
+                        receipt,
+                    })
+            })
+            .collect();
+        let provenance = store
+            .provenance
+            .iter()
+            .map(|(node, sources)| PersistedProvenance {
+                node: *node,
+                sources: sources.clone(),
+            })
+            .collect();
+        Self {
+            version: 1,
+            nodes,
+            edges,
+            provenance,
+            receipts,
+        }
+    }
+
+    fn into_store(self) -> io::Result<Store> {
+        if self.version != 1 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("unsupported store image version {}", self.version),
+            ));
+        }
+        let mut store = Store::new();
+        for node in self.nodes {
+            store.insert(node).map_err(invalid_store_image)?;
+        }
+        for edge in self.edges {
+            store
+                .link(edge.from, edge.to, edge.kind)
+                .map_err(invalid_store_image)?;
+        }
+        for provenance in self.provenance {
+            if !store.nodes.contains_key(&provenance.node) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("provenance for unknown node {}", provenance.node),
+                ));
+            }
+            store.provenance.insert(provenance.node, provenance.sources);
+        }
+        for persisted in self.receipts {
+            store
+                .attach_receipt(persisted.node, persisted.receipt)
+                .map_err(invalid_store_image)?;
+        }
+        if !store.verify_chain() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "persisted store image failed chain verification",
+            ));
+        }
+        if !store.verify_receipts() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "persisted store image failed receipt verification",
+            ));
+        }
+        Ok(store)
+    }
+}
+
+fn invalid_store_image(err: StoreError) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, err)
 }
 
 #[cfg(test)]
@@ -926,6 +1094,33 @@ mod tests {
             !s.verify_receipts(),
             "receipt content changes must fail even when graph_address still matches"
         );
+    }
+
+    #[test]
+    fn json_persistence_round_trips_nodes_edges_and_receipts() {
+        let mut s = Store::new();
+        let a = s.insert(cell("a")).unwrap();
+        let b = s.insert(cell("b")).unwrap();
+        s.link(a, b, "references").unwrap();
+        s.attach_receipt(a, receipt_for(a, "t.v0")).unwrap();
+
+        let path = std::env::temp_dir().join(format!(
+            "attractor-store-persistence-{}-{}.json",
+            std::process::id(),
+            a.to_hex()
+        ));
+        s.save_json(&path).unwrap();
+        let restored = Store::load_json(&path).unwrap();
+        std::fs::remove_file(path).unwrap();
+
+        assert_eq!(restored.len(), 2);
+        assert_eq!(restored.chain_len(), 2);
+        assert_eq!(restored.head(), s.head());
+        assert_eq!(restored.get(&a), s.get(&a));
+        assert_eq!(restored.relations(&a), s.relations(&a));
+        assert_eq!(restored.receipts(&a), s.receipts(&a));
+        assert!(restored.verify_chain());
+        assert!(restored.verify_receipts());
     }
 
     #[test]

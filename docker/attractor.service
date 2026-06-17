@@ -10,9 +10,9 @@
 # unix-socket-only by default — enabling remote access is a deliberate edit
 # (add `--tcp 127.0.0.1:7533` plus a reviewed exposure plan), never a default.
 #
-# The in-process store is memory-only today; a restart clears matrix state.
-# Persistence (store.data_dir in config.example.yaml) is future work — do not
-# treat daemon state as durable until that lands.
+# The daemon persists its store JSON under %h/attractor-run/store/store.json.
+# That host path is bind-mounted into the container at /var/lib/attractor so a
+# docker restart reloads matrix state instead of creating an empty store.
 #
 # Why no Requires=docker.service: this is a USER unit; the user manager cannot
 # see system units, so a Requires/After on docker.service would be silently
@@ -36,9 +36,12 @@ ExecStartPre=/bin/bash -c 'err=$(/usr/bin/docker container inspect attractor 2>&
   if [ "$rc" -eq 0 ]; then exec /usr/bin/docker rm -f attractor; fi; \
   case "$err" in *"No such container"*) exit 0;; \
   *) printf "%%s\n" "$err" >&2; exit "$rc";; esac'
+ExecStartPre=/bin/mkdir -p %h/attractor-run/store
 ExecStart=/usr/bin/docker run --name attractor --rm --init \
     --user 1000:1000 \
     -v %h/attractor-run:/run/attractor \
+    -v %h/attractor-run/store:/var/lib/attractor \
+    -e ATTRACTOR_STORE_PATH=/var/lib/attractor/store.json \
     attractor-run:latest
 ExecStop=/usr/bin/docker stop attractor
 Restart=on-failure

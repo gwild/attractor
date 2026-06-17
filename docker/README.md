@@ -48,7 +48,7 @@ a shared store lands.
 
 ```bash
 docker build -f docker/Dockerfile.run -t attractor-run .
-mkdir -p ~/attractor-run ~/.config/systemd/user
+mkdir -p ~/attractor-run/store ~/.config/systemd/user
 cp docker/attractor.service ~/.config/systemd/user/
 systemctl --user daemon-reload && systemctl --user enable --now attractor
 
@@ -59,5 +59,8 @@ ATTRACTOR_SOCKET_PATH=~/attractor-run/attractor_api.sock atctl ping
 Trust boundary: the socket dir (`~/attractor-run`) is the access-control
 surface — host filesystem permissions decide who can speak matrix verbs. No
 network listener exists unless an operator adds `--tcp` to the unit, which
-should ride its own reviewed change. Store state is memory-only today
-(restart clears it); persistence is future work.
+should ride its own reviewed change. Store state is persisted when
+`ATTRACTOR_STORE_PATH` names a JSON snapshot file; the shipped user unit mounts
+`~/attractor-run/store` and sets that path to
+`/var/lib/attractor/store.json`, so `docker restart attractor` reloads the same
+matrix state.
