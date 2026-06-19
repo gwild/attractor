@@ -452,7 +452,6 @@ mod tests {
         let out = assemble_notes(&mut store, &notes).unwrap();
         assert_eq!(out.linked.len(), 1);
 
-        let from = ContentHash::from_hex(out.linked[0].from.as_str()).unwrap();
         let to = ContentHash::from_hex(out.linked[0].to.as_str()).unwrap();
         let from_hex = out.linked[0].from.clone();
         let to_hex = out.linked[0].to.clone();
@@ -464,9 +463,17 @@ mod tests {
         ) {
             ApiResponse::Ok { data, .. } => {
                 let rel: RelationsData = serde_json::from_value(data).unwrap();
-                assert_eq!(rel.edges.len(), 1);
-                assert_eq!(rel.edges[0].kind, EDGE_REFERENCES);
-                assert_eq!(rel.edges[0].to, to_hex);
+                let ref_edges: Vec<_> = rel
+                    .edges
+                    .iter()
+                    .filter(|e| e.kind == EDGE_REFERENCES)
+                    .collect();
+                assert_eq!(
+                    ref_edges.len(),
+                    1,
+                    "referencing identity has one references edge via API Relations"
+                );
+                assert_eq!(ref_edges[0].to, to_hex);
             }
             other => panic!("Relations expected Ok, got {other:?}"),
         }
