@@ -35,6 +35,7 @@ dependencies = [
  "attractor-proto",
  "attractor-resolver",
  "attractor-store",
+ "serde_json",
 ]
 
 [[package]]
