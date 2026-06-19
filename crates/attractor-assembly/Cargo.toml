@@ -18,3 +18,4 @@ attractor-resolver = { path = "../attractor-resolver" }
 
 [dev-dependencies]
 attractor-api = { path = "../attractor-api", features = ["store"] }
+serde_json = "1"

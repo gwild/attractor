@@ -441,7 +441,7 @@ mod tests {
     fn ws7_e2e_api_relations_and_get_after_assembly() {
         use attractor_api::dispatch_with_store;
         use attractor_proto::{
-            ApiRequest, ApiResponse, ContentHashHex, GetData, RelationsData, RequestKind,
+            ApiRequest, ApiResponse, GetData, RelationsData, RequestKind,
         };
 
         let notes = vec![
