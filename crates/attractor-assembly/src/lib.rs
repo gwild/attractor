@@ -25,6 +25,13 @@
 //! reference whose target note is projected later still resolves and links — the
 //! resolve/link phase sees the complete batch.
 
+mod dogfood_query;
+
+pub use dogfood_query::{
+    ingest_dogfood_idempotent, identity_address_for_frontmatter_id, secretary_equivalent_query,
+    DogfoodQueryError, PrDisposition, ProvenanceAnchor, SecretaryEquivalentQuery,
+};
+
 use attractor_core::{ContentHash, ParseHashError};
 use attractor_projector::{
     project_markdown_frontmatter_id_into_store, project_markdown_references_into_store,
@@ -192,6 +199,61 @@ pub fn assemble_notes(store: &mut Store, notes: &[Note]) -> Result<AssemblyOutco
     for edge in edges.linked {
         let from = ContentHash::from_hex(edge.from.as_str()).map_err(AssemblyError::Hash)?;
         let to = ContentHash::from_hex(edge.to.as_str()).map_err(AssemblyError::Hash)?;
+        store
+            .link(from, to, edge.kind.clone())
+            .map_err(|source| AssemblyError::Link {
+                from: edge.from.clone(),
+                to: edge.to.clone(),
+                source,
+            })?;
+        linked.push(edge);
+    }
+
+    Ok(AssemblyOutcome {
+        receipts,
+        linked,
+        deferred: edges.deferred,
+    })
+}
+
+fn reference_edge_exists(store: &Store, from: &ContentHash, to: &ContentHash, kind: &str) -> bool {
+    store
+        .relations(from)
+        .iter()
+        .any(|edge| edge.to == *to && edge.kind == kind)
+}
+
+/// Like [`assemble_notes`], but skips reference edges that are already linked.
+///
+/// Used by #2653 dogfood ingest so evidence replay is idempotent on relation
+/// count (second pass links zero new `references` edges).
+pub fn assemble_notes_idempotent(
+    store: &mut Store,
+    notes: &[Note],
+) -> Result<AssemblyOutcome, AssemblyError> {
+    let mut receipts = Vec::new();
+
+    for note in notes {
+        project_title(store, note, &mut receipts)?;
+        project_frontmatter_id(store, note, &mut receipts)?;
+        let refs = project_markdown_references_into_store(store, &note.source, &note.markdown)
+            .map_err(|source| AssemblyError::Projector {
+                label: note.source.label.clone(),
+                source,
+            })?;
+        receipts.extend(refs);
+    }
+
+    let batch = resolve_batch(&receipts).map_err(AssemblyError::Resolver)?;
+    let edges = materialize_references(&batch);
+
+    let mut linked = Vec::with_capacity(edges.linked.len());
+    for edge in edges.linked {
+        let from = ContentHash::from_hex(edge.from.as_str()).map_err(AssemblyError::Hash)?;
+        let to = ContentHash::from_hex(edge.to.as_str()).map_err(AssemblyError::Hash)?;
+        if reference_edge_exists(store, &from, &to, &edge.kind) {
+            continue;
+        }
         store
             .link(from, to, edge.kind.clone())
             .map_err(|source| AssemblyError::Link {
@@ -504,5 +566,86 @@ mod tests {
             .map(|r| r.transform_id.clone())
             .collect();
         assert_eq!(kinds.len(), 2, "store multiset unchanged after API queries: {kinds:?}");
+    }
+
+    /// #2653 dogfood: replay attractor#38 + milton#2827 terminal evidence,
+    /// idempotent ingest, Relations/Get + Secretary-equivalent TERMINAL query.
+    #[test]
+    fn ws3_dogfood_2653_milton_pr_evidence() {
+        use super::{
+            ingest_dogfood_idempotent, secretary_equivalent_query, PrDisposition, Note,
+        };
+        use attractor_api::dispatch_with_store;
+        use attractor_proto::{ApiRequest, ApiResponse, RelationsData, RequestKind};
+
+        fn dogfood_note(rel_path: &str, bytes: &[u8]) -> Note {
+            Note {
+                source: attractor_projector::MarkdownSource {
+                    source_hash: ContentHashHex::new(ContentHash::of(bytes).to_hex()).unwrap(),
+                    origin: "repo:milton".to_owned(),
+                    label: rel_path.to_owned(),
+                },
+                markdown: bytes.to_vec(),
+            }
+        }
+
+        let pr38 = include_bytes!("../../../fixtures/dogfood/attractor-pr-38.md");
+        let pr2827 = include_bytes!("../../../fixtures/dogfood/milton-pr-2827.md");
+        let notes = vec![
+            dogfood_note("fixtures/dogfood/attractor-pr-38.md", pr38),
+            dogfood_note("fixtures/dogfood/milton-pr-2827.md", pr2827),
+        ];
+
+        let mut store = Store::new();
+        let outcome = ingest_dogfood_idempotent(&mut store, &notes).expect("idempotent ingest");
+
+        assert!(
+            !outcome.linked.is_empty(),
+            "expected cross-PR reference edges, got {:?}",
+            outcome.linked
+        );
+
+        let milton_addr = super::identity_address_for_frontmatter_id(
+            &store,
+            &outcome.receipts,
+            "milton:pr:2827",
+        )
+        .unwrap();
+        match dispatch_with_store(
+            &ApiRequest::new(RequestKind::Relations {
+                address: milton_addr.clone(),
+            }),
+            0,
+            &mut store,
+        ) {
+            ApiResponse::Ok { data, .. } => {
+                let rel: RelationsData = serde_json::from_value(data).unwrap();
+                let refs: Vec<_> = rel
+                    .edges
+                    .iter()
+                    .filter(|e| e.kind == EDGE_REFERENCES)
+                    .collect();
+                assert_eq!(refs.len(), 1, "Relations returns cross-PR reference edge");
+            }
+            other => panic!("Relations expected Ok, got {other:?}"),
+        }
+
+        let q38 = secretary_equivalent_query(&mut store, "attractor:pr:38", &outcome.receipts)
+            .expect("attractor#38 query");
+        assert_eq!(q38.disposition, PrDisposition::TerminalMerged);
+        assert!(
+            q38.provenance_anchors.len() >= 2,
+            "classification carries receipt anchors: {:?}",
+            q38.provenance_anchors
+        );
+
+        let q2827 =
+            secretary_equivalent_query(&mut store, "milton:pr:2827", &outcome.receipts)
+                .expect("milton#2827 query");
+        assert_eq!(q2827.disposition, PrDisposition::TerminalMerged);
+        assert!(
+            !q2827.provenance_anchors.is_empty(),
+            "milton#2827 provenance anchors present"
+        );
     }
 }
