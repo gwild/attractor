@@ -29,11 +29,13 @@ dependencies = [
 name = "attractor-assembly"
 version = "0.0.0"
 dependencies = [
+ "attractor-api",
  "attractor-core",
  "attractor-projector",
  "attractor-proto",
  "attractor-resolver",
  "attractor-store",
+ "serde_json",
 ]
 
 [[package]]

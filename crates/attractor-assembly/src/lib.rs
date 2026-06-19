@@ -434,4 +434,75 @@ mod tests {
             "receipt() would false-green multi-source recall"
         );
     }
+
+    /// WS-7 first end-to-end proof (#2346): ingest → assembly → API Relations + Get.
+    /// Consumer path must match store-level recall smoke; run via `scripts/ws7-e2e-api-smoke.sh`.
+    #[test]
+    fn ws7_e2e_api_relations_and_get_after_assembly() {
+        use attractor_api::dispatch_with_store;
+        use attractor_proto::{
+            ApiRequest, ApiResponse, GetData, RelationsData, RequestKind,
+        };
+
+        let notes = vec![
+            note(b"# Alpha\n", "a.md"),
+            note(b"# B Note\n\nsee [[Alpha]]\n", "b.md"),
+        ];
+        let mut store = Store::new();
+        let out = assemble_notes(&mut store, &notes).unwrap();
+        assert_eq!(out.linked.len(), 1);
+
+        let to = ContentHash::from_hex(out.linked[0].to.as_str()).unwrap();
+        let from_hex = out.linked[0].from.clone();
+        let to_hex = out.linked[0].to.clone();
+
+        match dispatch_with_store(
+            &ApiRequest::new(RequestKind::Relations { address: from_hex.clone() }),
+            0,
+            &mut store,
+        ) {
+            ApiResponse::Ok { data, .. } => {
+                let rel: RelationsData = serde_json::from_value(data).unwrap();
+                let ref_edges: Vec<_> = rel
+                    .edges
+                    .iter()
+                    .filter(|e| e.kind == EDGE_REFERENCES)
+                    .collect();
+                assert_eq!(
+                    ref_edges.len(),
+                    1,
+                    "referencing identity has one references edge via API Relations"
+                );
+                assert_eq!(ref_edges[0].to, to_hex);
+            }
+            other => panic!("Relations expected Ok, got {other:?}"),
+        }
+
+        match dispatch_with_store(
+            &ApiRequest::new(RequestKind::Get { address: to_hex.clone() }),
+            0,
+            &mut store,
+        ) {
+            ApiResponse::Ok { data, .. } => {
+                let get: GetData = serde_json::from_value(data).unwrap();
+                assert_eq!(get.address, to_hex);
+                assert!(!get.provenance_refs.is_empty());
+                assert_eq!(get.provenance_refs[0].origin, "repo:milton");
+                assert!(
+                    get.receipt.transform_id.contains("title"),
+                    "Get receipt must carry transform metadata: {}",
+                    get.receipt.transform_id
+                );
+                assert_eq!(get.receipt.graph_address, to_hex);
+            }
+            other => panic!("Get expected Ok, got {other:?}"),
+        }
+
+        let kinds: Vec<String> = store
+            .receipts(&to)
+            .iter()
+            .map(|r| r.transform_id.clone())
+            .collect();
+        assert_eq!(kinds.len(), 2, "store multiset unchanged after API queries: {kinds:?}");
+    }
 }
