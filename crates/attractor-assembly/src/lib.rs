@@ -275,9 +275,11 @@ pub fn assemble_notes_idempotent(
 mod tests {
     use super::{assemble_notes, Note};
     use attractor_core::ContentHash;
+    use attractor_projector::EDGE_DERIVED_FROM;
     use attractor_proto::ContentHashHex;
     use attractor_resolver::{DeferralReason, EDGE_REFERENCES};
     use attractor_store::Store;
+    use std::collections::BTreeSet;
 
     fn note(markdown: &[u8], label: &str) -> Note {
         Note {
@@ -611,6 +613,28 @@ mod tests {
             "milton:pr:2827",
         )
         .unwrap();
+        let milton_hash = ContentHash::from_hex(milton_addr.as_str()).unwrap();
+        let derived_from: Vec<_> = store
+            .relations(&milton_hash)
+            .into_iter()
+            .filter(|edge| edge.from == milton_hash && edge.kind == EDGE_DERIVED_FROM)
+            .collect();
+        assert!(
+            !derived_from.is_empty(),
+            "expected projected derived_from provenance links for milton#2827"
+        );
+        let mut unique_derived_from = BTreeSet::new();
+        for edge in &derived_from {
+            assert!(
+                unique_derived_from.insert((
+                    edge.from.to_hex(),
+                    edge.to.to_hex(),
+                    edge.kind.clone()
+                )),
+                "idempotent replay must not duplicate derived_from edge: {edge:?}"
+            );
+        }
+
         match dispatch_with_store(
             &ApiRequest::new(RequestKind::Relations {
                 address: milton_addr.clone(),

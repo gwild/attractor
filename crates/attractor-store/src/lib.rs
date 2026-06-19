@@ -401,7 +401,9 @@ impl Store {
 
     /// Relate two stored nodes with a typed edge.
     ///
-    /// Returns the [`Edge`] that was recorded.
+    /// Returns the [`Edge`] that was recorded. Re-linking the same `from`,
+    /// `to`, and `kind` is idempotent: the existing logical edge is returned
+    /// without adding a duplicate graph edge.
     ///
     /// # Errors
     /// - [`StoreError::DanglingEdge`] if either endpoint is not stored.
@@ -422,6 +424,14 @@ impl Store {
             .get(&to)
             .ok_or(StoreError::DanglingEdge { endpoint: to })?;
         let kind = kind.into();
+        if self
+            .graph
+            .edges_directed(from_idx, Direction::Outgoing)
+            .any(|edge| edge.target() == to_idx && edge.weight() == &kind)
+        {
+            return Ok(Edge { from, to, kind });
+        }
+
         let edge_idx = self.graph.add_edge(from_idx, to_idx, kind.clone());
         if is_cyclic_directed(&self.graph) {
             self.graph.remove_edge(edge_idx);
@@ -717,6 +727,20 @@ mod tests {
         assert_eq!(edge.from, a);
         assert_eq!(edge.to, b);
         assert_eq!(edge.kind, "contains");
+    }
+
+    #[test]
+    fn link_dedupes_identical_edge() {
+        let mut s = Store::new();
+        let a = s.insert(frame("from")).unwrap();
+        let b = s.insert(cell("to")).unwrap();
+
+        let first = s.link(a, b, "contains").unwrap();
+        let second = s.link(a, b, "contains").unwrap();
+
+        assert_eq!(first, second);
+        assert_eq!(s.relations(&a).len(), 1);
+        assert_eq!(s.relations(&b).len(), 1);
     }
 
     #[test]
