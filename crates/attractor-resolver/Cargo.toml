@@ -15,3 +15,5 @@ attractor-projector = { path = "../attractor-projector" }
 
 [dev-dependencies]
 attractor-core = { path = "../attractor-core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

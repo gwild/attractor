@@ -50,7 +50,10 @@
 //! Keeping both passes pure means the result is correct independent of when or
 //! whether the store is written.
 
-use attractor_proto::{ContentHashHex, E2eReceipt};
+use attractor_proto::{
+    ClaimHash, ContentHashHex, E2eReceipt, FieldRef, ReceiptComparison, ReceiptInt,
+    ReceiptStringList, TypedReceipt,
+};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 
@@ -65,6 +68,234 @@ pub const MARKDOWN_REFERENCES_RESOLVER: &str = "attractor.resolver.markdown.refe
 /// Edge kind a resolved reference would materialize as. Defined here so the
 /// identifier has a single home; this crate does not itself emit the edge.
 pub const EDGE_REFERENCES: &str = "references";
+
+/// Claim-side receipt fields parsed from a proof row.
+///
+/// `ProjectionClaim` carries the trigger surface (`cmd`, `repo_sha`, expected
+/// field names), but the comparison needs the claim's parsed expected receipt
+/// values as well. This L2 type is the behavior-layer claim input for
+/// [`compare_receipt_claim`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReceiptClaim {
+    /// Claim hash the parsed expected values belong to.
+    pub claim_hash: ClaimHash,
+    /// Load-bearing fields this claim requires before it can clear.
+    pub expected_fields: Vec<FieldRef>,
+    /// Expected command exit status.
+    pub exit: ReceiptInt,
+    /// Expected passing test count.
+    pub passed_count: ReceiptInt,
+    /// Expected failing test count.
+    pub failed_count: ReceiptInt,
+    /// Expected collected test count.
+    pub collected_count: ReceiptInt,
+    /// Expected suite identifiers.
+    pub suite_ids: ReceiptStringList,
+}
+
+/// Compare a parsed claim with a re-exec receipt.
+///
+/// Unknown load-bearing fields are terminal for this comparison: any unknown on
+/// either side returns [`ReceiptComparison::Incomplete`], never `Equal` or
+/// `Mismatch`. A claim that declares no load-bearing fields is incomplete by
+/// construction. Answered fields that are not declared in `expected_fields` are
+/// also incomplete: a claim can clear only when its declared scope covers every
+/// answered typed field, and every declared load-bearing field is known.
+#[must_use]
+pub fn compare_receipt_claim(claim: &ReceiptClaim, receipt: &TypedReceipt) -> ReceiptComparison {
+    if claim.expected_fields.is_empty() {
+        return ReceiptComparison::incomplete(vec![FieldRef {
+            path: "expected_fields".to_owned(),
+        }]);
+    }
+
+    let expected_paths: HashSet<&str> = claim
+        .expected_fields
+        .iter()
+        .map(|field| field.path.as_str())
+        .collect();
+    let mut unknown_fields = Vec::new();
+    let mut mismatch_fields = Vec::new();
+
+    push_missing_coverage_fields(claim, receipt, &expected_paths, &mut unknown_fields);
+
+    for field in &claim.expected_fields {
+        match field.path.as_str() {
+            "exit" => compare_int_field(
+                field,
+                &claim.exit,
+                &receipt.exit,
+                &mut unknown_fields,
+                &mut mismatch_fields,
+            ),
+            "passed_count" => compare_int_field(
+                field,
+                &claim.passed_count,
+                &receipt.passed_count,
+                &mut unknown_fields,
+                &mut mismatch_fields,
+            ),
+            "failed_count" => compare_int_field(
+                field,
+                &claim.failed_count,
+                &receipt.failed_count,
+                &mut unknown_fields,
+                &mut mismatch_fields,
+            ),
+            "collected_count" => compare_int_field(
+                field,
+                &claim.collected_count,
+                &receipt.collected_count,
+                &mut unknown_fields,
+                &mut mismatch_fields,
+            ),
+            "suite_ids" => compare_string_list_field(
+                field,
+                &claim.suite_ids,
+                &receipt.suite_ids,
+                &mut unknown_fields,
+                &mut mismatch_fields,
+            ),
+            _ => unknown_fields.push(field.clone()),
+        }
+    }
+
+    if !unknown_fields.is_empty() {
+        ReceiptComparison::incomplete(unknown_fields)
+    } else if !mismatch_fields.is_empty() {
+        ReceiptComparison::mismatch(mismatch_fields)
+    } else {
+        ReceiptComparison::equal()
+    }
+}
+
+fn push_missing_coverage_fields(
+    claim: &ReceiptClaim,
+    receipt: &TypedReceipt,
+    expected_paths: &HashSet<&str>,
+    unknown_fields: &mut Vec<FieldRef>,
+) {
+    for path in [
+        "exit",
+        "passed_count",
+        "failed_count",
+        "collected_count",
+        "suite_ids",
+    ] {
+        if expected_paths.contains(path) {
+            continue;
+        }
+
+        let answered = match path {
+            "exit" => int_field_is_answered(&claim.exit) || int_field_is_answered(&receipt.exit),
+            "passed_count" => {
+                int_field_is_answered(&claim.passed_count)
+                    || int_field_is_answered(&receipt.passed_count)
+            }
+            "failed_count" => {
+                int_field_is_answered(&claim.failed_count)
+                    || int_field_is_answered(&receipt.failed_count)
+            }
+            "collected_count" => {
+                int_field_is_answered(&claim.collected_count)
+                    || int_field_is_answered(&receipt.collected_count)
+            }
+            "suite_ids" => {
+                string_list_field_is_answered(&claim.suite_ids)
+                    || string_list_field_is_answered(&receipt.suite_ids)
+            }
+            _ => unreachable!("hardcoded receipt field path"),
+        };
+        if answered {
+            unknown_fields.push(FieldRef {
+                path: path.to_owned(),
+            });
+        }
+    }
+}
+
+const fn int_field_is_answered(value: &ReceiptInt) -> bool {
+    matches!(value, ReceiptInt::Known { .. })
+}
+
+const fn string_list_field_is_answered(value: &ReceiptStringList) -> bool {
+    matches!(value, ReceiptStringList::Known { .. })
+}
+
+fn compare_int_field(
+    fallback_field: &FieldRef,
+    claim_value: &ReceiptInt,
+    receipt_value: &ReceiptInt,
+    unknown_fields: &mut Vec<FieldRef>,
+    mismatch_fields: &mut Vec<FieldRef>,
+) {
+    match (claim_value, receipt_value) {
+        (ReceiptInt::Known { value: claim }, ReceiptInt::Known { value: receipt }) => {
+            if claim != receipt {
+                mismatch_fields.push(fallback_field.clone());
+            }
+        }
+        (claim, receipt) => push_unknown_field(fallback_field, claim, receipt, unknown_fields),
+    }
+}
+
+fn compare_string_list_field(
+    fallback_field: &FieldRef,
+    claim_value: &ReceiptStringList,
+    receipt_value: &ReceiptStringList,
+    unknown_fields: &mut Vec<FieldRef>,
+    mismatch_fields: &mut Vec<FieldRef>,
+) {
+    match (claim_value, receipt_value) {
+        (
+            ReceiptStringList::Known { value: claim },
+            ReceiptStringList::Known { value: receipt },
+        ) => {
+            if claim != receipt {
+                mismatch_fields.push(fallback_field.clone());
+            }
+        }
+        (claim, receipt) => {
+            push_unknown_string_list_field(fallback_field, claim, receipt, unknown_fields);
+        }
+    }
+}
+
+fn push_unknown_field(
+    fallback_field: &FieldRef,
+    claim_value: &ReceiptInt,
+    receipt_value: &ReceiptInt,
+    unknown_fields: &mut Vec<FieldRef>,
+) {
+    let start_len = unknown_fields.len();
+    if let ReceiptInt::Unknown { field_ref, .. } = claim_value {
+        unknown_fields.push(field_ref.clone());
+    }
+    if let ReceiptInt::Unknown { field_ref, .. } = receipt_value {
+        unknown_fields.push(field_ref.clone());
+    }
+    if unknown_fields.len() == start_len {
+        unknown_fields.push(fallback_field.clone());
+    }
+}
+
+fn push_unknown_string_list_field(
+    fallback_field: &FieldRef,
+    claim_value: &ReceiptStringList,
+    receipt_value: &ReceiptStringList,
+    unknown_fields: &mut Vec<FieldRef>,
+) {
+    let start_len = unknown_fields.len();
+    if let ReceiptStringList::Unknown { field_ref, .. } = claim_value {
+        unknown_fields.push(field_ref.clone());
+    }
+    if let ReceiptStringList::Unknown { field_ref, .. } = receipt_value {
+        unknown_fields.push(field_ref.clone());
+    }
+    if unknown_fields.len() == start_len {
+        unknown_fields.push(fallback_field.clone());
+    }
+}
 
 /// Which allowlisted promotion produced an identity node.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -439,7 +670,8 @@ pub fn materialize_references(batch: &BatchResolution) -> EdgeMaterialization {
 #[cfg(test)]
 mod tests {
     use super::{
-        materialize_references, owning_source_hash, resolve_batch, DeferralReason, IdentityKind,
+        compare_receipt_claim, int_field_is_answered, materialize_references, owning_source_hash,
+        resolve_batch, string_list_field_is_answered, DeferralReason, IdentityKind, ReceiptClaim,
         ResolutionStatus, ResolverError, EDGE_REFERENCES, MARKDOWN_REFERENCES_PROJECTOR,
     };
     use attractor_core::ContentHash;
@@ -447,7 +679,13 @@ mod tests {
         project_markdown_frontmatter_id, project_markdown_references, project_markdown_title,
         MarkdownSource,
     };
-    use attractor_proto::{ContentHashHex, E2eReceipt, SourceSpan};
+    use attractor_proto::{
+        ClaimFixtureHash, ClaimHash, ContentHashHex, E2eReceipt, FieldRef, FixtureManifestKind,
+        ReceiptComparison, ReceiptFixtureHash, ReceiptHash, ReceiptInt, ReceiptStringList,
+        SourceSpan, TypedReceipt,
+    };
+    use serde::Deserialize;
+    use std::collections::HashSet;
 
     /// A `MarkdownSource` whose declared hash matches `markdown` (the projectors
     /// reject a mismatch), labelled by `path` so distinct notes get distinct
@@ -457,6 +695,381 @@ mod tests {
             source_hash: ContentHashHex::new(ContentHash::of(markdown).to_hex()).unwrap(),
             origin: "repo:milton".to_owned(),
             label: path.to_owned(),
+        }
+    }
+
+    fn hash(seed: u8) -> ContentHashHex {
+        ContentHashHex::new(format!("{seed:064x}")).unwrap()
+    }
+
+    fn field(path: &str) -> FieldRef {
+        FieldRef {
+            path: path.to_owned(),
+        }
+    }
+
+    fn claim_fixture() -> ClaimFixtureHash {
+        ClaimFixtureHash {
+            manifest_kind: FixtureManifestKind::Claim,
+            manifest_ref: "fixtures/proof-claim.v0.json".to_owned(),
+            digest: hash(1),
+        }
+    }
+
+    fn receipt_fixture() -> ReceiptFixtureHash {
+        ReceiptFixtureHash {
+            manifest_kind: FixtureManifestKind::Receipt,
+            manifest_ref: "fixtures/proof-receipt.v0.json".to_owned(),
+            digest: hash(2),
+        }
+    }
+
+    fn default_claim(expected_fields: &[String]) -> ReceiptClaim {
+        ReceiptClaim {
+            claim_hash: ClaimHash {
+                fixture_hash: claim_fixture(),
+                digest: hash(3),
+            },
+            expected_fields: expected_fields.iter().map(|path| field(path)).collect(),
+            exit: unknown_int("exit"),
+            passed_count: unknown_int("passed_count"),
+            failed_count: unknown_int("failed_count"),
+            collected_count: unknown_int("collected_count"),
+            suite_ids: unknown_string_list("suite_ids"),
+        }
+    }
+
+    fn default_receipt() -> TypedReceipt {
+        TypedReceipt {
+            receipt_hash: ReceiptHash {
+                fixture_hash: receipt_fixture(),
+                digest: hash(4),
+            },
+            reexec_request_id: "reexec:claim3:receipt4:linux".to_owned(),
+            exit: unknown_int("exit"),
+            passed_count: unknown_int("passed_count"),
+            failed_count: unknown_int("failed_count"),
+            collected_count: unknown_int("collected_count"),
+            suite_ids: unknown_string_list("suite_ids"),
+            receipt_fixture_hash: receipt_fixture(),
+        }
+    }
+
+    fn unknown_int(path: &str) -> ReceiptInt {
+        ReceiptInt::Unknown {
+            reason: "fixture_omitted".to_owned(),
+            field_ref: field(path),
+        }
+    }
+
+    fn unknown_string_list(path: &str) -> ReceiptStringList {
+        ReceiptStringList::Unknown {
+            reason: "fixture_omitted".to_owned(),
+            field_ref: field(path),
+        }
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct CorpusRow {
+        id: String,
+        claim: CorpusClaim,
+        receipt: CorpusReceipt,
+        #[serde(default)]
+        expect: Option<ExpectedComparison>,
+        #[serde(default)]
+        forbid: Option<AllowedComparisonSet>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct CorpusClaim {
+        expected_fields: Vec<String>,
+        #[serde(default)]
+        exit: Option<ReceiptInt>,
+        #[serde(default)]
+        passed_count: Option<ReceiptInt>,
+        #[serde(default)]
+        failed_count: Option<ReceiptInt>,
+        #[serde(default)]
+        collected_count: Option<ReceiptInt>,
+        #[serde(default)]
+        suite_ids: Option<ReceiptStringList>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct CorpusReceipt {
+        #[serde(default)]
+        exit: Option<ReceiptInt>,
+        #[serde(default)]
+        passed_count: Option<ReceiptInt>,
+        #[serde(default)]
+        failed_count: Option<ReceiptInt>,
+        #[serde(default)]
+        collected_count: Option<ReceiptInt>,
+        #[serde(default)]
+        suite_ids: Option<ReceiptStringList>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct ExpectedComparison {
+        kind: ComparisonKind,
+        #[serde(default)]
+        mismatch_fields: Vec<String>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct AllowedComparisonSet {
+        allowed: Vec<ComparisonKind>,
+    }
+
+    #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+    #[serde(rename_all = "snake_case")]
+    enum ComparisonKind {
+        Equal,
+        Mismatch,
+        Incomplete,
+        NeedsReexec,
+    }
+
+    impl CorpusClaim {
+        fn into_claim(self) -> ReceiptClaim {
+            let mut claim = default_claim(&self.expected_fields);
+            if let Some(value) = self.exit {
+                claim.exit = value;
+            }
+            if let Some(value) = self.passed_count {
+                claim.passed_count = value;
+            }
+            if let Some(value) = self.failed_count {
+                claim.failed_count = value;
+            }
+            if let Some(value) = self.collected_count {
+                claim.collected_count = value;
+            }
+            if let Some(value) = self.suite_ids {
+                claim.suite_ids = value;
+            }
+            claim
+        }
+    }
+
+    impl CorpusReceipt {
+        fn into_receipt(self) -> TypedReceipt {
+            let mut receipt = default_receipt();
+            if let Some(value) = self.exit {
+                receipt.exit = value;
+            }
+            if let Some(value) = self.passed_count {
+                receipt.passed_count = value;
+            }
+            if let Some(value) = self.failed_count {
+                receipt.failed_count = value;
+            }
+            if let Some(value) = self.collected_count {
+                receipt.collected_count = value;
+            }
+            if let Some(value) = self.suite_ids {
+                receipt.suite_ids = value;
+            }
+            receipt
+        }
+    }
+
+    fn comparison_kind(comparison: &ReceiptComparison) -> ComparisonKind {
+        match comparison {
+            ReceiptComparison::Equal => ComparisonKind::Equal,
+            ReceiptComparison::Mismatch { .. } => ComparisonKind::Mismatch,
+            ReceiptComparison::Incomplete { .. } => ComparisonKind::Incomplete,
+            ReceiptComparison::NeedsReexec { .. } => ComparisonKind::NeedsReexec,
+            _ => panic!("unsupported future ReceiptComparison variant"),
+        }
+    }
+
+    fn load_comparison_corpus() -> Vec<CorpusRow> {
+        serde_json::from_str(include_str!(
+            "../../../fixtures/receipt_comparison/corpus.json"
+        ))
+        .unwrap()
+    }
+
+    fn has_unknown_int(value: &ReceiptInt) -> bool {
+        matches!(value, ReceiptInt::Unknown { .. })
+    }
+
+    fn field_unknown_shape(claim: &ReceiptClaim, receipt: &TypedReceipt, path: &str) -> u8 {
+        match path {
+            "exit" => {
+                u8::from(has_unknown_int(&claim.exit)) + u8::from(has_unknown_int(&receipt.exit))
+            }
+            "passed_count" => {
+                u8::from(has_unknown_int(&claim.passed_count))
+                    + u8::from(has_unknown_int(&receipt.passed_count))
+            }
+            "failed_count" => {
+                u8::from(has_unknown_int(&claim.failed_count))
+                    + u8::from(has_unknown_int(&receipt.failed_count))
+            }
+            "collected_count" => {
+                u8::from(has_unknown_int(&claim.collected_count))
+                    + u8::from(has_unknown_int(&receipt.collected_count))
+            }
+            "suite_ids" => {
+                let claim_unknown = matches!(claim.suite_ids, ReceiptStringList::Unknown { .. });
+                let receipt_unknown =
+                    matches!(receipt.suite_ids, ReceiptStringList::Unknown { .. });
+                u8::from(claim_unknown) + u8::from(receipt_unknown)
+            }
+            _ => 0,
+        }
+    }
+
+    fn answered_fields_outside_scope(
+        claim: &ReceiptClaim,
+        receipt: &TypedReceipt,
+    ) -> Vec<(bool, bool)> {
+        let expected: HashSet<_> = claim
+            .expected_fields
+            .iter()
+            .map(|field| field.path.as_str())
+            .collect();
+
+        [
+            (
+                "exit",
+                int_field_is_answered(&claim.exit),
+                int_field_is_answered(&receipt.exit),
+            ),
+            (
+                "passed_count",
+                int_field_is_answered(&claim.passed_count),
+                int_field_is_answered(&receipt.passed_count),
+            ),
+            (
+                "failed_count",
+                int_field_is_answered(&claim.failed_count),
+                int_field_is_answered(&receipt.failed_count),
+            ),
+            (
+                "collected_count",
+                int_field_is_answered(&claim.collected_count),
+                int_field_is_answered(&receipt.collected_count),
+            ),
+            (
+                "suite_ids",
+                string_list_field_is_answered(&claim.suite_ids),
+                string_list_field_is_answered(&receipt.suite_ids),
+            ),
+        ]
+        .into_iter()
+        .filter_map(|(path, claim_answered, receipt_answered)| {
+            (!expected.contains(path) && (claim_answered || receipt_answered))
+                .then_some((claim_answered, receipt_answered))
+        })
+        .collect()
+    }
+
+    #[test]
+    fn receipt_comparison_corpus_rows_are_constraining_and_complete() {
+        let rows = load_comparison_corpus();
+        let mut has_empty_expected_fields_forbid_row = false;
+        let mut has_claim_and_receipt_non_covering_forbid_row = false;
+        let mut has_receipt_only_non_covering_forbid_row = false;
+        let mut has_one_unknown_forbid_row = false;
+        let mut has_both_unknown_forbid_row = false;
+
+        for row in rows {
+            assert_ne!(row.expect.is_some(), row.forbid.is_some(), "{}", row.id);
+            let claim = row.claim.into_claim();
+            let receipt = row.receipt.into_receipt();
+
+            if row.forbid.is_some() && claim.expected_fields.is_empty() {
+                has_empty_expected_fields_forbid_row = true;
+            }
+            let answered_outside_scope = answered_fields_outside_scope(&claim, &receipt);
+            if row.forbid.is_some()
+                && answered_outside_scope
+                    .iter()
+                    .any(|(claim_answered, receipt_answered)| *claim_answered && *receipt_answered)
+            {
+                has_claim_and_receipt_non_covering_forbid_row = true;
+            }
+            if row.forbid.is_some()
+                && answered_outside_scope
+                    .iter()
+                    .any(|(claim_answered, receipt_answered)| !*claim_answered && *receipt_answered)
+            {
+                has_receipt_only_non_covering_forbid_row = true;
+            }
+
+            let max_unknown_sides = claim
+                .expected_fields
+                .iter()
+                .map(|field| field_unknown_shape(&claim, &receipt, &field.path))
+                .max()
+                .unwrap_or(0);
+            if row.forbid.is_some() && max_unknown_sides == 1 {
+                has_one_unknown_forbid_row = true;
+            }
+            if row.forbid.is_some() && max_unknown_sides == 2 {
+                has_both_unknown_forbid_row = true;
+            }
+        }
+
+        assert!(
+            has_empty_expected_fields_forbid_row,
+            "corpus must contain a forbid row with an empty expected_fields set"
+        );
+        assert!(
+            has_claim_and_receipt_non_covering_forbid_row,
+            "corpus must contain a forbid row with claim and receipt fields outside expected_fields"
+        );
+        assert!(
+            has_receipt_only_non_covering_forbid_row,
+            "corpus must contain a forbid row with receipt-only fields outside expected_fields"
+        );
+        assert!(
+            has_one_unknown_forbid_row,
+            "corpus must contain a forbid row with exactly one Unknown side"
+        );
+        assert!(
+            has_both_unknown_forbid_row,
+            "corpus must contain a forbid row with both sides Unknown"
+        );
+    }
+
+    #[test]
+    fn receipt_comparison_corpus_asserts_compare_return() {
+        for row in load_comparison_corpus() {
+            let id = row.id;
+            let expect = row.expect;
+            let forbid = row.forbid;
+            let claim = row.claim.into_claim();
+            let receipt = row.receipt.into_receipt();
+            let comparison = compare_receipt_claim(&claim, &receipt);
+
+            if let Some(expect) = expect {
+                assert_eq!(comparison_kind(&comparison), expect.kind, "{id}");
+                if expect.kind == ComparisonKind::Mismatch {
+                    match comparison {
+                        ReceiptComparison::Mismatch {
+                            mismatch_fields, ..
+                        } => {
+                            let actual: Vec<_> = mismatch_fields
+                                .into_iter()
+                                .map(|field| field.path)
+                                .collect();
+                            assert_eq!(actual, expect.mismatch_fields, "{id}");
+                        }
+                        _ => panic!("{id}: expected derived mismatch"),
+                    }
+                }
+            } else if let Some(forbid) = forbid {
+                assert!(
+                    forbid.allowed.contains(&comparison_kind(&comparison)),
+                    "{id}: forbidden comparison output {comparison:?}"
+                );
+            } else {
+                panic!("{id}: corpus row must declare expect or forbid");
+            }
         }
     }
 
