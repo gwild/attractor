@@ -5,7 +5,7 @@
 //! typed extracted fields and source-span/hash bindings; raw issue bodies stay
 //! outside derived graph rows.
 
-use crate::projection::{EvidenceCapability, FieldRef};
+use crate::projection::{EvidenceCapability, FieldRef, ScoreContribution};
 use crate::{ContentHashHex, SourceSpan};
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -208,8 +208,8 @@ pub struct IssueWikiStoreMutation {
     pub identity: String,
     /// Wiki note title.
     pub title: String,
-    /// Typed reference targets.
-    pub references: Vec<String>,
+    /// Typed reference targets with the source span that justified each one.
+    pub references: Vec<IssueWikiMutationReference>,
     /// Source artifact the mutation was derived from.
     pub source_ref: String,
     /// Source hash verified immediately before mutation construction.
@@ -218,6 +218,15 @@ pub struct IssueWikiStoreMutation {
     pub transform_id: String,
     /// Source spans that support the derived fields.
     pub source_spans: Vec<SourceSpan>,
+}
+
+/// Reference target preserved at the store-mutation boundary with provenance.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueWikiMutationReference {
+    /// Typed reference target.
+    pub target: String,
+    /// Source span that justified this target.
+    pub span: SourceSpan,
 }
 
 /// Why an issue-to-wiki projection cannot produce a store mutation.
@@ -232,6 +241,27 @@ pub enum IssueWikiProjectionError {
         /// Hash observed immediately before mutation.
         actual: ContentHashHex,
     },
+    /// The accepted-row envelope names a different source artifact.
+    SourceRefMismatch {
+        /// Source reference declared by the accepted source identity.
+        expected: String,
+        /// Source reference declared by the evidence envelope.
+        actual: String,
+    },
+    /// The accepted row carried a non-accepted envelope state.
+    EnvelopeStateMismatch {
+        /// Envelope state found on the accepted row.
+        actual: IssueWikiProjectionState,
+    },
+    /// The accepted row did not carry positive evidence capability.
+    CapabilityMismatch {
+        /// Whether routing/candidate resolution can see this row.
+        visible_for_resolution: bool,
+        /// Whether this row may be passed to positive-evidence APIs.
+        usable_as_positive_evidence: bool,
+        /// Scoring contribution declared by the row.
+        score: ScoreContribution,
+    },
     /// A derived field's span points at a different source hash.
     SpanHashMismatch {
         /// Derived field whose span was not bound to the source hash.
@@ -240,6 +270,15 @@ pub enum IssueWikiProjectionError {
         expected: ContentHashHex,
         /// Hash carried by the field span.
         actual: ContentHashHex,
+    },
+    /// A source span has an invalid byte range.
+    SpanRangeInvalid {
+        /// Derived field whose span range was invalid.
+        field_path: String,
+        /// Byte offset where the cited source span begins.
+        start: u64,
+        /// Byte offset where the cited source span ends.
+        end: u64,
     },
 }
 
@@ -254,6 +293,7 @@ impl IssueWikiAccepted {
         &self,
         observed_source_hash: &ContentHashHex,
     ) -> Result<IssueWikiStoreMutation, IssueWikiProjectionError> {
+        self.validate_accepted_envelope()?;
         if observed_source_hash != &self.source.source_hash {
             return Err(IssueWikiProjectionError::SourceHashMismatch {
                 source_ref: self.source.source_ref.clone(),
@@ -287,13 +327,42 @@ impl IssueWikiAccepted {
                 .note
                 .references
                 .iter()
-                .map(|reference| reference.target.clone())
+                .map(|reference| IssueWikiMutationReference {
+                    target: reference.target.clone(),
+                    span: reference.span.clone(),
+                })
                 .collect(),
             source_ref: self.source.source_ref.clone(),
             source_hash: self.source.source_hash.clone(),
             transform_id: self.envelope.transform_id.clone(),
             source_spans,
         })
+    }
+
+    fn validate_accepted_envelope(&self) -> Result<(), IssueWikiProjectionError> {
+        if self.envelope.projection_state != IssueWikiProjectionState::Accepted {
+            return Err(IssueWikiProjectionError::EnvelopeStateMismatch {
+                actual: self.envelope.projection_state,
+            });
+        }
+        if self.envelope.source_ref != self.source.source_ref {
+            return Err(IssueWikiProjectionError::SourceRefMismatch {
+                expected: self.source.source_ref.clone(),
+                actual: self.envelope.source_ref.clone(),
+            });
+        }
+        let capability = &self.envelope.capability;
+        if !capability.visible_for_resolution
+            || !capability.usable_as_positive_evidence
+            || capability.score != ScoreContribution::Positive
+        {
+            return Err(IssueWikiProjectionError::CapabilityMismatch {
+                visible_for_resolution: capability.visible_for_resolution,
+                usable_as_positive_evidence: capability.usable_as_positive_evidence,
+                score: capability.score,
+            });
+        }
+        Ok(())
     }
 
     fn validate_source_bindings(&self) -> Result<(), IssueWikiProjectionError> {
@@ -320,6 +389,13 @@ impl IssueWikiAccepted {
         field_path: &str,
         span: &SourceSpan,
     ) -> Result<(), IssueWikiProjectionError> {
+        if span.start > span.end {
+            return Err(IssueWikiProjectionError::SpanRangeInvalid {
+                field_path: field_path.to_owned(),
+                start: span.start,
+                end: span.end,
+            });
+        }
         if span.source_hash == self.source.source_hash {
             Ok(())
         } else {
@@ -345,6 +421,22 @@ impl fmt::Display for IssueWikiProjectionError {
                 expected.as_str(),
                 actual.as_str()
             ),
+            Self::SourceRefMismatch { expected, actual } => write!(
+                f,
+                "issue_wiki source_ref_mismatch expected={expected} actual={actual}"
+            ),
+            Self::EnvelopeStateMismatch { actual } => write!(
+                f,
+                "issue_wiki envelope_state_mismatch expected=accepted actual={actual}"
+            ),
+            Self::CapabilityMismatch {
+                visible_for_resolution,
+                usable_as_positive_evidence,
+                score,
+            } => write!(
+                f,
+                "issue_wiki capability_mismatch visible_for_resolution={visible_for_resolution} usable_as_positive_evidence={usable_as_positive_evidence} score={score:?}"
+            ),
             Self::SpanHashMismatch {
                 field_path,
                 expected,
@@ -354,6 +446,14 @@ impl fmt::Display for IssueWikiProjectionError {
                 "issue_wiki span_hash_mismatch field={field_path} expected={} actual={}",
                 expected.as_str(),
                 actual.as_str()
+            ),
+            Self::SpanRangeInvalid {
+                field_path,
+                start,
+                end,
+            } => write!(
+                f,
+                "issue_wiki span_range_invalid field={field_path} start={start} end={end}"
             ),
         }
     }
@@ -488,7 +588,10 @@ mod tests {
         assert_eq!(mutation.title, "Track issue-to-wiki migration contract");
         assert_eq!(
             mutation.references,
-            vec!["wiki:Attractor/Issue-to-Wiki-Migration".to_owned()]
+            vec![IssueWikiMutationReference {
+                target: "wiki:Attractor/Issue-to-Wiki-Migration".to_owned(),
+                span: span(row.source.source_hash.clone(), 96, 127, "issue.body"),
+            }]
         );
         assert_eq!(mutation.source_hash, row.source.source_hash);
         assert_eq!(mutation.source_spans.len(), 4);
@@ -517,6 +620,60 @@ mod tests {
             IssueWikiProjectionError::SpanHashMismatch { .. }
         ));
         assert!(err.to_string().contains("field=title"));
+    }
+
+    #[test]
+    fn source_ref_mismatch_fails_before_store_mutation() {
+        let mut row = accepted();
+        row.envelope.source_ref = "github:gwild/attractor#99".to_owned();
+        let err = row.to_store_mutation(&row.source.source_hash).unwrap_err();
+
+        assert!(matches!(
+            err,
+            IssueWikiProjectionError::SourceRefMismatch { .. }
+        ));
+        assert!(err.to_string().contains("source_ref_mismatch"));
+    }
+
+    #[test]
+    fn non_accepted_envelope_state_fails_before_store_mutation() {
+        let mut row = accepted();
+        row.envelope.projection_state = IssueWikiProjectionState::Stale;
+        row.envelope.capability = neutral_capability();
+        let err = row.to_store_mutation(&row.source.source_hash).unwrap_err();
+
+        assert!(matches!(
+            err,
+            IssueWikiProjectionError::EnvelopeStateMismatch { .. }
+        ));
+        assert!(err.to_string().contains("envelope_state_mismatch"));
+    }
+
+    #[test]
+    fn non_positive_capability_fails_before_store_mutation() {
+        let mut row = accepted();
+        row.envelope.capability = neutral_capability();
+        let err = row.to_store_mutation(&row.source.source_hash).unwrap_err();
+
+        assert!(matches!(
+            err,
+            IssueWikiProjectionError::CapabilityMismatch { .. }
+        ));
+        assert!(err.to_string().contains("capability_mismatch"));
+    }
+
+    #[test]
+    fn invalid_span_range_fails_before_store_mutation() {
+        let mut row = accepted();
+        row.note.title.span.start = 76;
+        row.note.title.span.end = 33;
+        let err = row.to_store_mutation(&row.source.source_hash).unwrap_err();
+
+        assert!(matches!(
+            err,
+            IssueWikiProjectionError::SpanRangeInvalid { .. }
+        ));
+        assert!(err.to_string().contains("span_range_invalid"));
     }
 
     #[test]
