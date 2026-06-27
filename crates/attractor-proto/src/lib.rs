@@ -23,6 +23,16 @@ use std::fmt;
 /// external projectors.
 pub mod projection;
 
+/// Issue-to-wiki migration projection contract.
+pub mod issue_wiki;
+
+pub use issue_wiki::{
+    IssueWikiAccepted, IssueWikiMalformed, IssueWikiNoteEvidence, IssueWikiProjectionEnvelope,
+    IssueWikiProjectionError, IssueWikiProjectionResult, IssueWikiProjectionState,
+    IssueWikiReference, IssueWikiSource, IssueWikiStale, IssueWikiStoreMutation, SpanBoundText,
+    ISSUE_WIKI_SCHEMA_ID_V0,
+};
+
 pub use projection::{
     ActionSet, ActionSetRef, ClaimFixtureHash, ClaimHash, CrossRepoContract, EvidenceCapability,
     EvidenceEnvelope, FieldRef, FixtureManifestKind, GateMeetResult, GitBlobSha,
