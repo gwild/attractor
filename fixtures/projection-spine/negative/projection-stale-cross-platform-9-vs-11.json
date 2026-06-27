@@ -1,0 +1,10 @@
+{
+  "projection_state": "stale",
+  "source_ref": "gwild/milton#3031:pull_request_body",
+  "claim_hash": "claim:cross-platform-row-linux-86cacfda",
+  "stored_receipt_hash": "receipt:body-output-9-passed",
+  "reexec_request_id": "reexec:3031-linux-9-vs-11",
+  "mismatch_fields": ["passed_count", "output_excerpt"],
+  "score": "neutral",
+  "capability": "not_positive_evidence"
+}

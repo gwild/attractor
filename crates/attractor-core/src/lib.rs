@@ -37,6 +37,8 @@ pub use sanitize::Sanitized;
 
 pub mod ingest;
 
+pub mod projection_spine;
+
 pub mod source_map;
 pub use source_map::{ByteRange, LineRange, MarkdownSourceSpan, SyntaxKind, TypedEvidence};
 

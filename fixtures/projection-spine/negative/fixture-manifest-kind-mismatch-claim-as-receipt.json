@@ -1,0 +1,6 @@
+{
+  "projection_state": "fixture_manifest_kind_mismatch",
+  "expected_kind": "receipt-fixtures",
+  "actual_manifest_ref": "claim-fixtures@blake3:example",
+  "digest_ref": "blake3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+}

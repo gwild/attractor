@@ -1,0 +1,8 @@
+{
+  "fixture_name": "allowed-action-empty-without-policy-ref",
+  "wire_value": {
+    "meet_state": "allowed",
+    "actions": []
+  },
+  "expected_rejection": "AllowedActionSetMissingPolicyRef"
+}

@@ -1,0 +1,4 @@
+{
+  "meet_state": "unmapped",
+  "refs": ["constraint:newly-promoted-without-action-map"]
+}
