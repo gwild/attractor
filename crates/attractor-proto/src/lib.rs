@@ -27,10 +27,10 @@ pub mod projection;
 pub mod issue_wiki;
 
 pub use issue_wiki::{
-    IssueWikiAccepted, IssueWikiMalformed, IssueWikiMutationReference, IssueWikiNoteEvidence,
-    IssueWikiProjectionEnvelope, IssueWikiProjectionError, IssueWikiProjectionResult,
-    IssueWikiProjectionState, IssueWikiReference, IssueWikiSource, IssueWikiStale,
-    IssueWikiStoreMutation, SpanBoundText, ISSUE_WIKI_SCHEMA_ID_V0,
+    IssueWikiAccepted, IssueWikiConformanceReceipt, IssueWikiMalformed, IssueWikiMutationReference,
+    IssueWikiNoteEvidence, IssueWikiProjectionEnvelope, IssueWikiProjectionError,
+    IssueWikiProjectionResult, IssueWikiProjectionState, IssueWikiReference, IssueWikiSource,
+    IssueWikiStale, IssueWikiStoreMutation, SpanBoundText, ISSUE_WIKI_SCHEMA_ID_V0,
 };
 
 pub use projection::{

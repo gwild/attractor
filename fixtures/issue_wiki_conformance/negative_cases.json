@@ -1,0 +1,32 @@
+[
+  {
+    "id": "identity_same_value_wrong_span",
+    "mutation": "identity_span_from_title",
+    "reason": "span_mismatch:identity"
+  },
+  {
+    "id": "title_same_value_wrong_span",
+    "mutation": "title_span_from_identity",
+    "reason": "span_mismatch:title"
+  },
+  {
+    "id": "reference_same_value_wrong_span",
+    "mutation": "reference0_span_from_reference1",
+    "reason": "span_mismatch:references[0].target"
+  },
+  {
+    "id": "identity_same_span_wrong_value",
+    "mutation": "identity_value_different",
+    "reason": "value_mismatch:identity"
+  },
+  {
+    "id": "title_same_span_wrong_value",
+    "mutation": "title_value_different",
+    "reason": "value_mismatch:title"
+  },
+  {
+    "id": "reference_same_span_wrong_value",
+    "mutation": "reference0_value_different",
+    "reason": "value_mismatch:references[0].target"
+  }
+]
