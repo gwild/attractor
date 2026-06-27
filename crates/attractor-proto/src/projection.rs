@@ -18,6 +18,82 @@ pub struct FieldRef {
     pub path: String,
 }
 
+/// Git blob SHA-1 used to bind an external projector path at a repository SHA.
+///
+/// This is deliberately not [`ContentHashHex`]: Git blob object ids in the
+/// current cross-repo contract are 40-character SHA-1 hex strings.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[serde(transparent)]
+pub struct GitBlobSha(String);
+
+impl GitBlobSha {
+    /// Build a validated lowercase Git SHA-1 blob id.
+    ///
+    /// # Errors
+    /// Returns [`GitBlobShaError`] when `value` is not exactly 40 lowercase hex
+    /// characters.
+    pub fn new(value: impl Into<String>) -> Result<Self, GitBlobShaError> {
+        let value = value.into();
+        if value.len() != 40 {
+            return Err(GitBlobShaError::WrongLength { len: value.len() });
+        }
+        if let Some(bad) = value
+            .bytes()
+            .find(|&b| !matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+        {
+            return Err(GitBlobShaError::InvalidByte { byte: bad });
+        }
+        Ok(Self(value))
+    }
+
+    /// Borrow the validated lowercase Git blob id.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for GitBlobSha {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::new(value).map_err(serde::de::Error::custom)
+    }
+}
+
+/// Why a Git blob SHA was invalid.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GitBlobShaError {
+    /// Digest was not 40 characters long.
+    WrongLength {
+        /// The supplied string length.
+        len: usize,
+    },
+    /// Digest included a byte outside `0-9a-f`.
+    InvalidByte {
+        /// The offending byte.
+        byte: u8,
+    },
+}
+
+impl fmt::Display for GitBlobShaError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::WrongLength { len } => write!(f, "git blob sha length {len} != 40"),
+            Self::InvalidByte { byte } => {
+                write!(
+                    f,
+                    "git blob sha contains non-lowercase-hex byte 0x{byte:02x}"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for GitBlobShaError {}
+
 /// What kind of fixture manifest produced a fixture hash.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -118,7 +194,7 @@ pub struct MiltonProjectorRef {
     /// Projector file path at `sha`.
     pub path: String,
     /// Git blob hash of `path` at `sha`, verified before deriving the schema digest.
-    pub blob_hash: String,
+    pub blob_hash: GitBlobSha,
 }
 
 /// Review-visible cross-repo contract block for projection PRs.
@@ -375,7 +451,7 @@ pub enum UnsupportedRemediation {
 }
 
 /// Total projection result; consumers must handle every variant explicitly.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(tag = "projection_state", content = "row", rename_all = "snake_case")]
 pub enum ProjectionResult {
     /// Projection is usable as positive evidence.
@@ -386,6 +462,58 @@ pub enum ProjectionResult {
     Stale(ProjectionStale),
     /// Consumer does not support the schema tuple.
     SchemaUnsupported(ProjectionUnsupported),
+}
+
+impl<'de> Deserialize<'de> for ProjectionResult {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = ProjectionResultWire::deserialize(deserializer)?;
+        match value {
+            ProjectionResultWire::Ok(row) => {
+                expect_projection_state(row.envelope.projection_state, ProjectionState::Ok)?;
+                Ok(Self::Ok(row))
+            }
+            ProjectionResultWire::Invalid(row) => {
+                expect_projection_state(row.envelope.projection_state, ProjectionState::Invalid)?;
+                Ok(Self::Invalid(row))
+            }
+            ProjectionResultWire::Stale(row) => {
+                expect_projection_state(row.envelope.projection_state, ProjectionState::Stale)?;
+                Ok(Self::Stale(row))
+            }
+            ProjectionResultWire::SchemaUnsupported(row) => {
+                expect_projection_state(
+                    row.envelope.projection_state,
+                    ProjectionState::SchemaUnsupported,
+                )?;
+                Ok(Self::SchemaUnsupported(row))
+            }
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "projection_state", content = "row", rename_all = "snake_case")]
+enum ProjectionResultWire {
+    Ok(ProjectionOk),
+    Invalid(ProjectionInvalid),
+    Stale(ProjectionStale),
+    SchemaUnsupported(ProjectionUnsupported),
+}
+
+fn expect_projection_state<E>(actual: ProjectionState, expected: ProjectionState) -> Result<(), E>
+where
+    E: serde::de::Error,
+{
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(E::custom(format!(
+            "projection_state mismatch: tag={expected}, envelope={actual}"
+        )))
+    }
 }
 
 /// Reference to an action-set definition.
@@ -653,6 +781,45 @@ mod tests {
     }
 
     #[test]
+    fn projection_result_rejects_tag_envelope_state_disagreement() {
+        let row = serde_json::json!({
+            "projection_state": "ok",
+            "row": {
+                "schema": schema(),
+                "claim": claim(),
+                "parsed_receipt": receipt(11),
+                "envelope": envelope(ProjectionState::Stale, positive_capability())
+            }
+        });
+        let err = serde_json::from_value::<ProjectionResult>(row).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("projection_state mismatch: tag=ok, envelope=stale"));
+    }
+
+    #[test]
+    fn receipt_comparison_variants_round_trip() {
+        let variants = [
+            ReceiptComparison::Equal,
+            ReceiptComparison::Mismatch {
+                mismatch_fields: vec![field("passed_count")],
+            },
+            ReceiptComparison::Incomplete {
+                unknown_fields: vec![field("collected_count")],
+            },
+            ReceiptComparison::NeedsReexec {
+                claim_hash: claim().claim_hash,
+                receipt_hash: receipt(9).receipt_hash,
+            },
+        ];
+        for variant in variants {
+            let json = serde_json::to_string(&variant).unwrap();
+            let back: ReceiptComparison = serde_json::from_str(&json).unwrap();
+            assert_eq!(variant, back);
+        }
+    }
+
+    #[test]
     fn empty_action_set_requires_policy_ref_on_the_wire() {
         let invalid = serde_json::json!({
             "id": "deny-all",
@@ -673,6 +840,20 @@ mod tests {
         let json = serde_json::to_string(&valid).unwrap();
         let back: ActionSet = serde_json::from_str(&json).unwrap();
         assert_eq!(valid, back);
+    }
+
+    #[test]
+    fn git_blob_sha_validates_wire_values() {
+        assert!(GitBlobSha::new("a0b1c2d3e4f506172839405060708090aabbccdd").is_ok());
+        assert!(matches!(
+            GitBlobSha::new("a".repeat(39)),
+            Err(GitBlobShaError::WrongLength { len: 39 })
+        ));
+        let bad = format!("{}G", "a".repeat(39));
+        assert!(matches!(
+            GitBlobSha::new(bad),
+            Err(GitBlobShaError::InvalidByte { byte: b'G' })
+        ));
     }
 
     #[test]
@@ -712,7 +893,7 @@ mod tests {
                 repo: "gwild/milton".to_owned(),
                 sha: "86cacfda1ac0721bb2fafe187e9857de8d3d3a09".to_owned(),
                 path: ".claude/hooks/block-pr-create-without-headings.py".to_owned(),
-                blob_hash: "a0b1c2d3e4f506172839405060708090aabbccdd".to_owned(),
+                blob_hash: GitBlobSha::new("a0b1c2d3e4f506172839405060708090aabbccdd").unwrap(),
             },
             negative_stale_fixture: "pr3031_commit_rebind_stale_9_passed".to_owned(),
         };

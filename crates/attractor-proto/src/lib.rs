@@ -25,11 +25,11 @@ pub mod projection;
 
 pub use projection::{
     ActionSet, ActionSetRef, ClaimFixtureHash, ClaimHash, CrossRepoContract, EvidenceCapability,
-    EvidenceEnvelope, FieldRef, FixtureManifestKind, GateMeetResult, MiltonProjectorRef,
-    ProjectionClaim, ProjectionInvalid, ProjectionOk, ProjectionResult, ProjectionSchemaTuple,
-    ProjectionStale, ProjectionState, ProjectionUnsupported, ReceiptComparison, ReceiptFixtureHash,
-    ReceiptHash, ReceiptInt, ReceiptStringList, ScoreContribution, TypedReceipt, UnmappedGate,
-    UnsupportedRemediation, PROJECTION_SCHEMA_ID_V0,
+    EvidenceEnvelope, FieldRef, FixtureManifestKind, GateMeetResult, GitBlobSha,
+    MiltonProjectorRef, ProjectionClaim, ProjectionInvalid, ProjectionOk, ProjectionResult,
+    ProjectionSchemaTuple, ProjectionStale, ProjectionState, ProjectionUnsupported,
+    ReceiptComparison, ReceiptFixtureHash, ReceiptHash, ReceiptInt, ReceiptStringList,
+    ScoreContribution, TypedReceipt, UnmappedGate, UnsupportedRemediation, PROJECTION_SCHEMA_ID_V0,
 };
 
 /// Portable content-hash representation on the wire.
