@@ -35,6 +35,19 @@ pub struct SpanBoundText {
     pub span: SourceSpan,
 }
 
+/// Extractor-time proof that a typed value is bound to its source bytes.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueWikiConformanceReceipt {
+    /// Content hash of the exact source bytes checked by the extractor.
+    pub source_hash: ContentHashHex,
+    /// Typed field path, for example `identity`, `title`, or `references[0].target`.
+    pub field_path: String,
+    /// Content hash of the typed field value bytes.
+    pub value_hash: ContentHashHex,
+    /// Source span whose bytes must equal the typed value.
+    pub span: SourceSpan,
+}
+
 /// Typed wiki reference evidence extracted from an issue.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IssueWikiReference {
@@ -88,7 +101,7 @@ pub struct IssueWikiProjectionEnvelope {
 }
 
 /// Accepted issue-to-wiki projection.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct IssueWikiAccepted {
     /// Schema id this projection used.
     pub schema_id: String,
@@ -96,8 +109,44 @@ pub struct IssueWikiAccepted {
     pub source: IssueWikiSource,
     /// Typed wiki-note evidence. This deliberately omits raw issue body text.
     pub note: IssueWikiNoteEvidence,
+    /// Extractor-time value/span/source-hash receipts for load-bearing fields.
+    pub conformance_receipts: Vec<IssueWikiConformanceReceipt>,
     /// Shared evidence envelope.
     pub envelope: IssueWikiProjectionEnvelope,
+}
+
+impl<'de> Deserialize<'de> for IssueWikiAccepted {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let row = IssueWikiAcceptedWire::deserialize(deserializer)?;
+        let accepted = Self {
+            schema_id: row.schema_id,
+            source: row.source,
+            note: row.note,
+            conformance_receipts: row.conformance_receipts,
+            envelope: row.envelope,
+        };
+        accepted
+            .validate_offline_value_hashes()
+            .map_err(serde::de::Error::custom)?;
+        Ok(accepted)
+    }
+}
+
+#[derive(Deserialize)]
+struct IssueWikiAcceptedWire {
+    schema_id: String,
+    source: IssueWikiSource,
+    note: IssueWikiNoteEvidence,
+    conformance_receipts: Vec<IssueWikiConformanceReceipt>,
+    envelope: IssueWikiProjectionEnvelope,
+}
+
+fn issue_wiki_value_hash(value: &str) -> ContentHashHex {
+    ContentHashHex::new(blake3::hash(value.as_bytes()).to_hex().to_string())
+        .expect("blake3 lowercase hex is always valid")
 }
 
 /// Stale issue source that must be reprojected before store mutation.
@@ -283,6 +332,49 @@ pub enum IssueWikiProjectionError {
 }
 
 impl IssueWikiAccepted {
+    fn validate_offline_value_hashes(&self) -> Result<(), String> {
+        self.expect_offline_receipt("identity", &self.note.identity.value)?;
+        self.expect_offline_receipt("title", &self.note.title.value)?;
+        for (idx, reference) in self.note.references.iter().enumerate() {
+            self.expect_offline_receipt(&format!("references[{idx}].target"), &reference.target)?;
+            if let Some(label) = &reference.label {
+                self.expect_offline_receipt(&format!("references[{idx}].label"), &label.value)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn expect_offline_receipt(&self, field_path: &str, value: &str) -> Result<(), String> {
+        let receipt = self
+            .conformance_receipts
+            .iter()
+            .find(|receipt| receipt.field_path == field_path)
+            .ok_or_else(|| format!("issue_wiki missing_conformance_receipt field={field_path}"))?;
+        if receipt.source_hash != self.source.source_hash {
+            return Err(format!(
+                "issue_wiki conformance_source_hash_mismatch field={field_path} expected={} actual={}",
+                self.source.source_hash.as_str(),
+                receipt.source_hash.as_str()
+            ));
+        }
+        if receipt.span.source_hash != self.source.source_hash {
+            return Err(format!(
+                "issue_wiki conformance_span_hash_mismatch field={field_path} expected={} actual={}",
+                self.source.source_hash.as_str(),
+                receipt.span.source_hash.as_str()
+            ));
+        }
+        let expected_hash = issue_wiki_value_hash(value);
+        if receipt.value_hash != expected_hash {
+            return Err(format!(
+                "issue_wiki conformance_value_hash_mismatch field={field_path} expected={} actual={}",
+                expected_hash.as_str(),
+                receipt.value_hash.as_str()
+            ));
+        }
+        Ok(())
+    }
+
     /// Convert accepted projection evidence into a store mutation only after
     /// checking the current source hash and every derived field span.
     ///
@@ -558,6 +650,32 @@ mod tests {
                     span: span(source_hash.clone(), 96, 127, "issue.body"),
                 }],
             },
+            conformance_receipts: vec![
+                IssueWikiConformanceReceipt {
+                    source_hash: source_hash.clone(),
+                    field_path: "identity".to_owned(),
+                    value_hash: issue_wiki_value_hash("attractor.issue.43.issue-to-wiki-migration"),
+                    span: span(source_hash.clone(), 0, 32, "issue.number"),
+                },
+                IssueWikiConformanceReceipt {
+                    source_hash: source_hash.clone(),
+                    field_path: "title".to_owned(),
+                    value_hash: issue_wiki_value_hash("Track issue-to-wiki migration contract"),
+                    span: span(source_hash.clone(), 33, 76, "issue.title"),
+                },
+                IssueWikiConformanceReceipt {
+                    source_hash: source_hash.clone(),
+                    field_path: "references[0].target".to_owned(),
+                    value_hash: issue_wiki_value_hash("wiki:Attractor/Issue-to-Wiki-Migration"),
+                    span: span(source_hash.clone(), 96, 127, "issue.body"),
+                },
+                IssueWikiConformanceReceipt {
+                    source_hash: source_hash.clone(),
+                    field_path: "references[0].label".to_owned(),
+                    value_hash: issue_wiki_value_hash("issue-to-wiki migration"),
+                    span: span(source_hash.clone(), 104, 127, "issue.body"),
+                },
+            ],
             envelope: envelope(IssueWikiProjectionState::Accepted, source_hash),
         }
     }
@@ -715,6 +833,7 @@ mod tests {
                 "schema_id": ISSUE_WIKI_SCHEMA_ID_V0,
                 "source": accepted().source,
                 "note": accepted().note,
+                "conformance_receipts": accepted().conformance_receipts,
                 "envelope": envelope(IssueWikiProjectionState::Stale, hash(1))
             }
         });
@@ -722,6 +841,19 @@ mod tests {
         assert!(err
             .to_string()
             .contains("issue_wiki projection_state mismatch: tag=accepted, envelope=stale"));
+    }
+
+    #[test]
+    fn accepted_row_rejects_stored_value_hash_mismatch_without_source_bytes() {
+        let row = IssueWikiProjectionResult::Accepted(Box::new(accepted()));
+        let mut value = serde_json::to_value(row).unwrap();
+        value["row"]["note"]["title"]["value"] =
+            serde_json::Value::String("Tampered title".to_owned());
+
+        let err = serde_json::from_value::<IssueWikiProjectionResult>(value).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("issue_wiki conformance_value_hash_mismatch field=title"));
     }
 
     #[test]

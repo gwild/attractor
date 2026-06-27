@@ -15,7 +15,13 @@
 use attractor_core::{
     ByteRange, Cell, ContentHash, LineRange, MarkdownSourceSpan, Primitive, SourceRef, SyntaxKind,
 };
-use attractor_proto::{ContentHashHex, E2eReceipt, ProvenanceRef, SourceSpan};
+use attractor_proto::{
+    ContentHashHex, E2eReceipt, EvidenceCapability, FieldRef, IssueWikiAccepted,
+    IssueWikiConformanceReceipt, IssueWikiMalformed, IssueWikiNoteEvidence,
+    IssueWikiProjectionEnvelope, IssueWikiProjectionResult, IssueWikiProjectionState,
+    IssueWikiReference, IssueWikiSource, IssueWikiStale, ProvenanceRef, ScoreContribution,
+    SourceSpan, SpanBoundText, ISSUE_WIKI_SCHEMA_ID_V0,
+};
 use attractor_store::{Node, Store, StoreError};
 use std::fmt;
 
@@ -38,6 +44,8 @@ pub const MARKDOWN_FRONTMATTER_ID_PROJECTOR: &str =
 pub const MARKDOWN_REFERENCES_PROJECTOR: &str = "attractor.projector.markdown.references.v0";
 /// Edge kind from a derived markdown value back to its source document ref.
 pub const EDGE_DERIVED_FROM: &str = "derived_from";
+/// Stable transform identifier for the issue-to-wiki extractor.
+pub const ISSUE_WIKI_PROJECTOR: &str = "attractor.projector.issue_wiki.v0";
 
 /// Source metadata for a markdown document entering the projector.
 ///
@@ -52,6 +60,20 @@ pub struct MarkdownSource {
     pub origin: String,
     /// Path or stable human label for the source document.
     pub label: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct IssueWikiField {
+    value: String,
+    start: u64,
+    end: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct IssueWikiParsed {
+    identity: IssueWikiField,
+    title: IssueWikiField,
+    references: Vec<IssueWikiField>,
 }
 
 /// Derived projection output that is ready for a caller to write to the store.
@@ -92,6 +114,16 @@ pub enum ProjectorError {
     MissingTitle,
     /// No promotable frontmatter `id` was found in a leading `---` block.
     MissingFrontmatterId,
+    /// Issue source did not contain a required issue-to-wiki field.
+    MissingIssueWikiField {
+        /// Required field path that was absent.
+        field_path: String,
+    },
+    /// Issue source declared an invalid reference index.
+    InvalidIssueWikiReferenceIndex {
+        /// Field path that could not be mapped to a parsed reference.
+        field_path: String,
+    },
     /// Content addressing failed.
     Address(attractor_core::AddressError),
     /// JSON content addressing failed for a derived source-ref node.
@@ -116,6 +148,18 @@ impl fmt::Display for ProjectorError {
             Self::MissingFrontmatterId => {
                 f.write_str("markdown source has no promotable frontmatter id")
             }
+            Self::MissingIssueWikiField { field_path } => {
+                write!(
+                    f,
+                    "issue_wiki source is missing required field {field_path}"
+                )
+            }
+            Self::InvalidIssueWikiReferenceIndex { field_path } => {
+                write!(
+                    f,
+                    "issue_wiki source has invalid reference field {field_path}"
+                )
+            }
             Self::Address(e) => write!(f, "cannot address projected node: {e}"),
             Self::Serde(e) => write!(f, "cannot address projected source ref: {e}"),
             Self::InvalidSourceHash(e) => write!(f, "invalid source hash: {e}"),
@@ -134,6 +178,8 @@ impl std::error::Error for ProjectorError {
             Self::SourceHashMismatch { .. }
             | Self::MissingTitle
             | Self::MissingFrontmatterId
+            | Self::MissingIssueWikiField { .. }
+            | Self::InvalidIssueWikiReferenceIndex { .. }
             | Self::InvalidSourceHash(_) => None,
         }
     }
@@ -272,6 +318,92 @@ pub fn project_markdown_title_into_store(
     }
     store.attach_receipt(graph_addr, projection.receipt.clone())?;
     Ok(projection.receipt)
+}
+
+/// Extract issue-to-wiki evidence from source bytes with value/span receipts.
+///
+/// This is the L2 issue-wiki conformance boundary: raw issue bytes are consumed
+/// by the extractor, but accepted rows contain only typed values plus
+/// extractor-time receipts binding `{source_hash, field_path, value_hash,
+/// span}`. No store mutation is constructed here.
+#[must_use]
+pub fn project_issue_wiki(
+    source: IssueWikiSource,
+    source_bytes: &[u8],
+) -> IssueWikiProjectionResult {
+    let actual_source_hash = hash_hex(&ContentHash::of(source_bytes));
+    if actual_source_hash != source.source_hash {
+        return IssueWikiProjectionResult::Stale(Box::new(IssueWikiStale {
+            schema_id: ISSUE_WIKI_SCHEMA_ID_V0.to_owned(),
+            source_ref: source.source_ref.clone(),
+            expected_source_hash: source.source_hash.clone(),
+            actual_source_hash: actual_source_hash.clone(),
+            envelope: issue_wiki_envelope(
+                IssueWikiProjectionState::Stale,
+                &source.source_ref,
+                actual_source_hash,
+                Vec::new(),
+            ),
+        }));
+    }
+
+    let note = match parse_issue_wiki_note(&source, source_bytes) {
+        Ok(note) => note,
+        Err(err) => {
+            return issue_wiki_malformed(
+                &source,
+                err.to_string(),
+                vec![issue_wiki_error_field_ref(&err)],
+            );
+        }
+    };
+    project_issue_wiki_candidate(source, source_bytes, note)
+}
+
+fn project_issue_wiki_candidate(
+    source: IssueWikiSource,
+    source_bytes: &[u8],
+    note: IssueWikiNoteEvidence,
+) -> IssueWikiProjectionResult {
+    let actual_source_hash = hash_hex(&ContentHash::of(source_bytes));
+    if actual_source_hash != source.source_hash {
+        return IssueWikiProjectionResult::Stale(Box::new(IssueWikiStale {
+            schema_id: ISSUE_WIKI_SCHEMA_ID_V0.to_owned(),
+            source_ref: source.source_ref.clone(),
+            expected_source_hash: source.source_hash.clone(),
+            actual_source_hash: actual_source_hash.clone(),
+            envelope: issue_wiki_envelope(
+                IssueWikiProjectionState::Stale,
+                &source.source_ref,
+                actual_source_hash,
+                Vec::new(),
+            ),
+        }));
+    }
+
+    let receipts = match validate_issue_wiki_conformance(&source, source_bytes, &note) {
+        Ok(receipts) => receipts,
+        Err((reason, field_refs)) => return issue_wiki_malformed(&source, reason, field_refs),
+    };
+    let field_refs = receipts
+        .iter()
+        .map(|receipt| FieldRef {
+            path: receipt.field_path.clone(),
+        })
+        .collect();
+
+    IssueWikiProjectionResult::Accepted(Box::new(IssueWikiAccepted {
+        schema_id: ISSUE_WIKI_SCHEMA_ID_V0.to_owned(),
+        source: source.clone(),
+        note,
+        conformance_receipts: receipts,
+        envelope: issue_wiki_envelope(
+            IssueWikiProjectionState::Accepted,
+            &source.source_ref,
+            source.source_hash,
+            field_refs,
+        ),
+    }))
 }
 
 /// Project a note's frontmatter `id` into a derived identity node plus receipt.
@@ -528,6 +660,292 @@ pub fn project_markdown_references_into_store(
     Ok(receipts)
 }
 
+fn issue_wiki_envelope(
+    state: IssueWikiProjectionState,
+    source_ref: &str,
+    source_hash: ContentHashHex,
+    field_refs: Vec<FieldRef>,
+) -> IssueWikiProjectionEnvelope {
+    IssueWikiProjectionEnvelope {
+        projection_state: state,
+        capability: match state {
+            IssueWikiProjectionState::Accepted => EvidenceCapability {
+                visible_for_resolution: true,
+                usable_as_positive_evidence: true,
+                score: ScoreContribution::Positive,
+            },
+            IssueWikiProjectionState::Stale | IssueWikiProjectionState::Malformed => {
+                EvidenceCapability {
+                    visible_for_resolution: true,
+                    usable_as_positive_evidence: false,
+                    score: ScoreContribution::Neutral,
+                }
+            }
+        },
+        source_ref: source_ref.to_owned(),
+        source_hash,
+        transform_id: ISSUE_WIKI_PROJECTOR.to_owned(),
+        field_refs,
+    }
+}
+
+fn issue_wiki_malformed(
+    source: &IssueWikiSource,
+    reason: String,
+    field_refs: Vec<FieldRef>,
+) -> IssueWikiProjectionResult {
+    IssueWikiProjectionResult::Malformed(Box::new(IssueWikiMalformed {
+        schema_id: Some(ISSUE_WIKI_SCHEMA_ID_V0.to_owned()),
+        source_ref: source.source_ref.clone(),
+        reason,
+        field_refs: field_refs.clone(),
+        envelope: issue_wiki_envelope(
+            IssueWikiProjectionState::Malformed,
+            &source.source_ref,
+            source.source_hash.clone(),
+            field_refs,
+        ),
+    }))
+}
+
+fn issue_wiki_error_field_ref(err: &ProjectorError) -> FieldRef {
+    match err {
+        ProjectorError::MissingIssueWikiField { field_path }
+        | ProjectorError::InvalidIssueWikiReferenceIndex { field_path } => FieldRef {
+            path: field_path.clone(),
+        },
+        _ => FieldRef {
+            path: "source".to_owned(),
+        },
+    }
+}
+
+fn parse_issue_wiki_note(
+    source: &IssueWikiSource,
+    source_bytes: &[u8],
+) -> Result<IssueWikiNoteEvidence, ProjectorError> {
+    let parsed = parse_issue_wiki_source(source_bytes)?;
+    Ok(IssueWikiNoteEvidence {
+        identity: span_bound_text(
+            parsed.identity.value,
+            &source.source_hash,
+            parsed.identity.start,
+            parsed.identity.end,
+            "identity",
+        ),
+        title: span_bound_text(
+            parsed.title.value,
+            &source.source_hash,
+            parsed.title.start,
+            parsed.title.end,
+            "title",
+        ),
+        references: parsed
+            .references
+            .into_iter()
+            .enumerate()
+            .map(|(idx, reference)| IssueWikiReference {
+                target: reference.value,
+                label: None,
+                span: source_span(
+                    source.source_hash.clone(),
+                    reference.start,
+                    reference.end,
+                    &format!("references[{idx}].target"),
+                ),
+            })
+            .collect(),
+    })
+}
+
+fn span_bound_text(
+    value: String,
+    source_hash: &ContentHashHex,
+    start: u64,
+    end: u64,
+    field_path: &str,
+) -> SpanBoundText {
+    SpanBoundText {
+        value,
+        span: source_span(source_hash.clone(), start, end, field_path),
+    }
+}
+
+fn source_span(source_hash: ContentHashHex, start: u64, end: u64, field_path: &str) -> SourceSpan {
+    SourceSpan {
+        source_hash,
+        start,
+        end,
+        label: Some(field_path.to_owned()),
+    }
+}
+
+fn parse_issue_wiki_source(source_bytes: &[u8]) -> Result<IssueWikiParsed, ProjectorError> {
+    let text = std::str::from_utf8(source_bytes).map_err(ProjectorError::InvalidUtf8)?;
+    let mut identity = None;
+    let mut title = None;
+    let mut references = Vec::new();
+    let mut offset = 0usize;
+
+    for line in text.split_inclusive('\n') {
+        let line_without_newline = line.trim_end_matches(['\r', '\n']);
+        if identity.is_none() {
+            identity = issue_wiki_line_field(line_without_newline, offset, "identity:");
+        }
+        if title.is_none() {
+            title = issue_wiki_line_field(line_without_newline, offset, "title:");
+        }
+        if let Some(reference) = issue_wiki_line_field(line_without_newline, offset, "reference:") {
+            references.push(reference);
+        }
+        offset += line.len();
+    }
+
+    Ok(IssueWikiParsed {
+        identity: identity.ok_or_else(|| ProjectorError::MissingIssueWikiField {
+            field_path: "identity".to_owned(),
+        })?,
+        title: title.ok_or_else(|| ProjectorError::MissingIssueWikiField {
+            field_path: "title".to_owned(),
+        })?,
+        references,
+    })
+}
+
+fn issue_wiki_line_field(line: &str, offset: usize, prefix: &str) -> Option<IssueWikiField> {
+    let value = line.strip_prefix(prefix)?;
+    let lead_ws = value.len() - value.trim_start().len();
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let start = offset + prefix.len() + lead_ws;
+    let end = start + trimmed.len();
+    Some(IssueWikiField {
+        value: trimmed.to_owned(),
+        start: u64::try_from(start).unwrap_or(u64::MAX),
+        end: u64::try_from(end).unwrap_or(u64::MAX),
+    })
+}
+
+fn validate_issue_wiki_conformance(
+    source: &IssueWikiSource,
+    source_bytes: &[u8],
+    note: &IssueWikiNoteEvidence,
+) -> Result<Vec<IssueWikiConformanceReceipt>, (String, Vec<FieldRef>)> {
+    let expected = parse_issue_wiki_source(source_bytes)
+        .map_err(|err| (err.to_string(), vec![issue_wiki_error_field_ref(&err)]))?;
+    let mut receipts = Vec::with_capacity(2 + note.references.len());
+
+    validate_span_bound_text(
+        "identity",
+        &expected.identity,
+        &note.identity,
+        &source.source_hash,
+        source_bytes,
+        &mut receipts,
+    )?;
+    validate_span_bound_text(
+        "title",
+        &expected.title,
+        &note.title,
+        &source.source_hash,
+        source_bytes,
+        &mut receipts,
+    )?;
+    for (idx, reference) in note.references.iter().enumerate() {
+        let field_path = format!("references[{idx}].target");
+        let Some(expected_ref) = expected.references.get(idx) else {
+            return Err((
+                ProjectorError::InvalidIssueWikiReferenceIndex {
+                    field_path: field_path.clone(),
+                }
+                .to_string(),
+                vec![FieldRef { path: field_path }],
+            ));
+        };
+        validate_text_span(
+            &field_path,
+            expected_ref,
+            &reference.target,
+            &reference.span,
+            &source.source_hash,
+            source_bytes,
+            &mut receipts,
+        )?;
+    }
+    Ok(receipts)
+}
+
+fn validate_span_bound_text(
+    field_path: &str,
+    expected: &IssueWikiField,
+    actual: &SpanBoundText,
+    source_hash: &ContentHashHex,
+    source_bytes: &[u8],
+    receipts: &mut Vec<IssueWikiConformanceReceipt>,
+) -> Result<(), (String, Vec<FieldRef>)> {
+    validate_text_span(
+        field_path,
+        expected,
+        &actual.value,
+        &actual.span,
+        source_hash,
+        source_bytes,
+        receipts,
+    )
+}
+
+fn validate_text_span(
+    field_path: &str,
+    expected: &IssueWikiField,
+    value: &str,
+    span: &SourceSpan,
+    source_hash: &ContentHashHex,
+    source_bytes: &[u8],
+    receipts: &mut Vec<IssueWikiConformanceReceipt>,
+) -> Result<(), (String, Vec<FieldRef>)> {
+    let field_ref = FieldRef {
+        path: field_path.to_owned(),
+    };
+    if span.source_hash != *source_hash {
+        return Err((
+            format!("span_source_hash_mismatch:{field_path}"),
+            vec![field_ref],
+        ));
+    }
+    if span.start != expected.start || span.end != expected.end {
+        return Err((format!("span_mismatch:{field_path}"), vec![field_ref]));
+    }
+    if value != expected.value {
+        return Err((format!("value_mismatch:{field_path}"), vec![field_ref]));
+    }
+    let Some(bytes) = source_bytes_for_span(source_bytes, span) else {
+        return Err((format!("span_range_invalid:{field_path}"), vec![field_ref]));
+    };
+    if bytes != value.as_bytes() {
+        return Err((format!("value_span_mismatch:{field_path}"), vec![field_ref]));
+    }
+
+    receipts.push(IssueWikiConformanceReceipt {
+        source_hash: source_hash.clone(),
+        field_path: field_path.to_owned(),
+        value_hash: hash_hex(&ContentHash::of(bytes)),
+        span: span.clone(),
+    });
+    Ok(())
+}
+
+fn source_bytes_for_span<'a>(source_bytes: &'a [u8], span: &SourceSpan) -> Option<&'a [u8]> {
+    let start = usize::try_from(span.start).ok()?;
+    let end = usize::try_from(span.end).ok()?;
+    if start > end || end > source_bytes.len() {
+        None
+    } else {
+        Some(&source_bytes[start..end])
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Heading<'a> {
     title: &'a str,
@@ -750,14 +1168,18 @@ fn hash_hex(hash: &ContentHash) -> ContentHashHex {
 #[cfg(test)]
 mod tests {
     use super::{
+        parse_issue_wiki_note, project_issue_wiki, project_issue_wiki_candidate,
         project_markdown_frontmatter_id, project_markdown_frontmatter_id_into_store,
         project_markdown_references, project_markdown_references_into_store,
         project_markdown_title, project_markdown_title_into_store, MarkdownSource, ProjectorError,
-        EDGE_DERIVED_FROM, MARKDOWN_FRONTMATTER_ID_PROJECTOR, MARKDOWN_REFERENCES_PROJECTOR,
-        MARKDOWN_TITLE_PROJECTOR,
+        EDGE_DERIVED_FROM, ISSUE_WIKI_PROJECTOR, MARKDOWN_FRONTMATTER_ID_PROJECTOR,
+        MARKDOWN_REFERENCES_PROJECTOR, MARKDOWN_TITLE_PROJECTOR,
     };
     use attractor_core::ContentHash;
-    use attractor_proto::{ApiRequest, ApiResponse, ContentHashHex, GetData, RequestKind};
+    use attractor_proto::{
+        ApiRequest, ApiResponse, ContentHashHex, GetData, IssueWikiNoteEvidence,
+        IssueWikiProjectionResult, IssueWikiProjectionState, IssueWikiSource, RequestKind,
+    };
     use attractor_store::Store;
 
     fn source(markdown: &[u8]) -> MarkdownSource {
@@ -773,6 +1195,152 @@ mod tests {
             source_hash: ContentHashHex::new(ContentHash::of(hash_source).to_hex()).unwrap(),
             origin: "repo:milton".to_owned(),
             label: "tasks/wendy.md".to_owned(),
+        }
+    }
+
+    fn issue_source(source_bytes: &[u8]) -> IssueWikiSource {
+        IssueWikiSource {
+            repo: "gwild/attractor".to_owned(),
+            issue_number: 43,
+            source_ref: "github:gwild/attractor#43".to_owned(),
+            source_hash: ContentHashHex::new(ContentHash::of(source_bytes).to_hex()).unwrap(),
+        }
+    }
+
+    fn issue_fixture() -> &'static [u8] {
+        include_bytes!("../../../fixtures/issue_wiki_conformance/source.issue")
+    }
+
+    fn malformed_reason(row: IssueWikiProjectionResult) -> String {
+        match row {
+            IssueWikiProjectionResult::Malformed(row) => row.reason,
+            other => panic!("expected malformed issue_wiki row, got {other:?}"),
+        }
+    }
+
+    fn apply_issue_wiki_negative_mutation(note: &mut IssueWikiNoteEvidence, mutation: &str) {
+        match mutation {
+            "identity_span_from_title" => {
+                note.identity.span = note.title.span.clone();
+            }
+            "title_span_from_identity" => {
+                note.title.span = note.identity.span.clone();
+            }
+            "reference0_span_from_reference1" => {
+                note.references[0].span = note.references[1].span.clone();
+            }
+            "identity_value_different" => {
+                note.identity.value = "Different".to_owned();
+            }
+            "title_value_different" => {
+                note.title.value = "Different".to_owned();
+            }
+            "reference0_value_different" => {
+                note.references[0].target = "wiki:Different".to_owned();
+            }
+            _ => panic!("unknown issue_wiki negative mutation {mutation}"),
+        }
+    }
+
+    #[test]
+    fn issue_wiki_extractor_emits_conformance_receipts_without_raw_body() {
+        let source_bytes = issue_fixture();
+        let row = project_issue_wiki(issue_source(source_bytes), source_bytes);
+        let accepted = match row {
+            IssueWikiProjectionResult::Accepted(row) => row,
+            other => panic!("expected accepted issue_wiki row, got {other:?}"),
+        };
+
+        assert_eq!(
+            accepted.envelope.projection_state,
+            IssueWikiProjectionState::Accepted
+        );
+        assert_eq!(accepted.envelope.transform_id, ISSUE_WIKI_PROJECTOR);
+        assert_eq!(accepted.note.identity.value, "Same");
+        assert_eq!(accepted.note.title.value, "Same");
+        assert_eq!(accepted.note.references.len(), 2);
+        assert_eq!(accepted.conformance_receipts.len(), 4);
+        assert_eq!(accepted.conformance_receipts[0].field_path, "identity");
+        assert_eq!(accepted.conformance_receipts[1].field_path, "title");
+        assert_eq!(
+            accepted.conformance_receipts[2].field_path,
+            "references[0].target"
+        );
+        assert_eq!(
+            accepted.conformance_receipts[3].field_path,
+            "references[1].target"
+        );
+        for receipt in &accepted.conformance_receipts {
+            assert_eq!(receipt.source_hash, accepted.source.source_hash);
+            assert_eq!(receipt.span.source_hash, accepted.source.source_hash);
+            let start = usize::try_from(receipt.span.start).unwrap();
+            let end = usize::try_from(receipt.span.end).unwrap();
+            assert_eq!(
+                receipt.value_hash.as_str(),
+                ContentHash::of(&source_bytes[start..end]).to_hex()
+            );
+        }
+        assert_eq!(
+            accepted.conformance_receipts[0].value_hash.as_str(),
+            ContentHash::of(b"Same").to_hex()
+        );
+        assert_eq!(
+            accepted.conformance_receipts[2].value_hash.as_str(),
+            ContentHash::of(b"wiki:Same").to_hex()
+        );
+
+        let json = serde_json::to_string(&accepted).unwrap();
+        assert!(!json.contains("RAW ISSUE BODY"));
+        assert!(!json.contains("raw_issue_body"));
+    }
+
+    #[test]
+    fn issue_wiki_negative_conformance_fixtures_are_malformed_before_acceptance() {
+        let source_bytes = issue_fixture();
+        let source = issue_source(source_bytes);
+        let cases: Vec<serde_json::Value> = serde_json::from_str(include_str!(
+            "../../../fixtures/issue_wiki_conformance/negative_cases.json"
+        ))
+        .unwrap();
+
+        for case in cases {
+            let id = case["id"].as_str().unwrap();
+            let mutation = case["mutation"].as_str().unwrap();
+            let reason = case["reason"].as_str().unwrap();
+            let mut note = parse_issue_wiki_note(&source, source_bytes).unwrap();
+            apply_issue_wiki_negative_mutation(&mut note, mutation);
+
+            assert_eq!(
+                malformed_reason(project_issue_wiki_candidate(
+                    source.clone(),
+                    source_bytes,
+                    note
+                )),
+                reason,
+                "{id}"
+            );
+        }
+    }
+
+    #[test]
+    fn issue_wiki_source_hash_change_is_stale_not_malformed() {
+        let source_bytes = issue_fixture();
+        let mut source = issue_source(source_bytes);
+        source.source_hash = ContentHashHex::new(ContentHash::of(b"old issue").to_hex()).unwrap();
+
+        let row = project_issue_wiki(source, source_bytes);
+        match row {
+            IssueWikiProjectionResult::Stale(row) => {
+                assert_eq!(
+                    row.envelope.projection_state,
+                    IssueWikiProjectionState::Stale
+                );
+                assert_eq!(
+                    row.actual_source_hash.as_str(),
+                    ContentHash::of(source_bytes).to_hex()
+                );
+            }
+            other => panic!("expected stale issue_wiki row, got {other:?}"),
         }
     }
 
