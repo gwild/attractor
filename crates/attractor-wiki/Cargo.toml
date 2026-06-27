@@ -10,6 +10,7 @@ description = "No-network issue-wiki write boundary: materialize validated apply
 repository = "https://github.com/gwild/attractor"
 
 [dependencies]
+attractor-projector = { path = "../attractor-projector" }
 attractor-proto = { path = "../attractor-proto" }
 blake3 = "1"
 serde = { version = "1", features = ["derive"] }

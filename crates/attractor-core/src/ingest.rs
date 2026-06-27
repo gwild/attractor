@@ -7,7 +7,7 @@
 //! mapping → shipped [`Cell`]/[`Frame`]/[`SourceRef`] → `attractor-store`
 //! inserts them.
 //!
-//! Codec/identity is locked per the #2243 thread: identity is serde_json
+//! Codec/identity is locked per the #2243 thread: identity is `serde_json`
 //! content-addressing (audmon's bincode is transport only), and `f32` widens to
 //! `f64` exactly (no new `Primitive` variant). Float cells go through
 //! [`Cell::address`], so a NaN/Inf in the audio stream is rejected loudly
@@ -27,8 +27,11 @@ pub struct PartialsMeta {
     pub gain: f64,
 }
 
-/// The result of ingesting one partials payload: every produced node plus the
-/// content address of the top `audmon.partials_frame` (the query entry point).
+/// The result of ingesting one partials payload.
+///
+/// Carries every produced node plus the content address of the top
+/// `audmon.partials_frame` (the query entry point).
+///
 /// All `cells` and `frames` are content-addressed and ready for
 /// `attractor-store` to insert; nothing here is audmon-specific.
 #[derive(Clone, Debug, PartialEq)]
