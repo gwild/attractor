@@ -1,0 +1,22 @@
+{
+  "projection_state": "projection_schema_unsupported",
+  "schema_id": "attractor.projection.layer1.v0",
+  "source_ref": {
+    "repo": "gwild/milton",
+    "artifact_ref": "pull/3031/body",
+    "raw_hash": "3333333333333333333333333333333333333333333333333333333333333333"
+  },
+  "evidence_capability": {
+    "visible_for_resolution": true,
+    "usable_as_positive_evidence": false,
+    "score": "neutral"
+  },
+  "stored_tuple": {
+    "schema_id": "attractor.projection.layer1.v1",
+    "projector_digest": "4444444444444444444444444444444444444444444444444444444444444444",
+    "fixture_set_digest": "5555555555555555555555555555555555555555555555555555555555555555"
+  },
+  "consumer_id": "attractor.resolver.layer1.v0",
+  "supported_tuples_hash": "6666666666666666666666666666666666666666666666666666666666666666",
+  "remediation": "add_support"
+}

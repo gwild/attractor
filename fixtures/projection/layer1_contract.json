@@ -1,0 +1,12 @@
+{
+  "tracked_by": "gwild/milton#3030",
+  "schema_artifact_digest": "7777777777777777777777777777777777777777777777777777777777777777",
+  "milton_projector_ref": {
+    "repo": "gwild/milton",
+    "sha": "e0c21c812338a1ec779917cd31663559057ae4c9",
+    "path": ".claude/hooks/block-pr-create-without-headings.py",
+    "blob_hash_algorithm": "git-sha1",
+    "blob_hash": "a7001967bf5537b3ca0b3c6a1a3e981983b9c533"
+  },
+  "negative_stale_row_fixture": "projection_stale_restamped.json"
+}

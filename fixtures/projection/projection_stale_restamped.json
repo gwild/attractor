@@ -1,0 +1,39 @@
+{
+  "projection_state": "projection_stale",
+  "schema_id": "attractor.projection.layer1.v0",
+  "source_ref": {
+    "repo": "gwild/milton",
+    "artifact_ref": "pull/3031/body",
+    "raw_hash": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+  },
+  "evidence_capability": {
+    "visible_for_resolution": true,
+    "usable_as_positive_evidence": false,
+    "score": "neutral"
+  },
+  "claim": {
+    "cmd": "venv/bin/python -m pytest tests/test_start_agent_reap.py",
+    "repo_sha": "86cacfda1ac0721bb2fafe187e9857de8d3d3a09",
+    "platform": "linux",
+    "expected_fields": ["exit_code", "output"]
+  },
+  "stored_receipt": {
+    "satisfies_claim_hash": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "fields": {
+      "exit_code": {
+        "state": "known",
+        "value": "0"
+      },
+      "output": {
+        "state": "known",
+        "value": "9 passed"
+      }
+    }
+  },
+  "reexec_request_id": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+  "mismatch": {
+    "mismatch_fields": ["output"],
+    "stored_receipt_hash": "1111111111111111111111111111111111111111111111111111111111111111",
+    "reexec_receipt_hash": "2222222222222222222222222222222222222222222222222222222222222222"
+  }
+}

@@ -1,0 +1,33 @@
+{
+  "projection_state": "projection_ok",
+  "schema_id": "attractor.projection.layer1.v0",
+  "source_ref": {
+    "repo": "gwild/milton",
+    "artifact_ref": "pull/3031/body",
+    "raw_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "evidence_capability": {
+    "visible_for_resolution": true,
+    "usable_as_positive_evidence": true,
+    "score": "positive"
+  },
+  "claim": {
+    "cmd": "venv/bin/python -m pytest tests/test_start_agent_reap.py",
+    "repo_sha": "86cacfda1ac0721bb2fafe187e9857de8d3d3a09",
+    "platform": "linux",
+    "expected_fields": ["exit_code", "output"]
+  },
+  "receipt": {
+    "satisfies_claim_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "fields": {
+      "exit_code": {
+        "state": "known",
+        "value": "0"
+      },
+      "output": {
+        "state": "known",
+        "value": "11 passed"
+      }
+    }
+  }
+}

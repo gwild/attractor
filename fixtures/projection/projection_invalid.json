@@ -1,0 +1,16 @@
+{
+  "projection_state": "projection_invalid",
+  "schema_id": "attractor.projection.layer1.v0",
+  "source_ref": {
+    "repo": "gwild/milton",
+    "artifact_ref": "pull/3031/body",
+    "raw_hash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+  },
+  "evidence_capability": {
+    "visible_for_resolution": true,
+    "usable_as_positive_evidence": false,
+    "score": "neutral"
+  },
+  "reason": "missing_required_field",
+  "field_refs": ["cross_platform.rows[0].output"]
+}

@@ -19,6 +19,9 @@
 use serde::{Deserialize, Deserializer, Serialize};
 use std::fmt;
 
+/// Proof-projection and evidence-row schema spine for Layer 1.
+pub mod projection;
+
 /// Portable content-hash representation on the wire.
 ///
 /// Core owns the concrete `ContentHash` bytes; the protocol layer keeps the
