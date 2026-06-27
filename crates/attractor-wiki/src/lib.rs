@@ -53,8 +53,12 @@ pub struct IssueWikiWriteReceipt {
     pub relative_file_path: String,
     /// Apply receipt key this local write consumed.
     pub apply_key: ContentHashHex,
+    /// Whether the page existed in the local wiki tree before any write.
+    pub pre_write_exists: bool,
     /// Snapshot observed in the local wiki tree before any write.
     pub pre_write_snapshot: IssueWikiPageSnapshot,
+    /// Whether the page existed in the local wiki tree after write/noop.
+    pub post_write_exists: bool,
     /// Snapshot observed after the write/noop.
     pub post_write_snapshot: IssueWikiPageSnapshot,
     /// Deterministic key for idempotent write receipt replay.
@@ -73,7 +77,9 @@ impl<'de> Deserialize<'de> for IssueWikiWriteReceipt {
             page_path: receipt.page_path,
             relative_file_path: receipt.relative_file_path,
             apply_key: receipt.apply_key,
+            pre_write_exists: receipt.pre_write_exists,
             pre_write_snapshot: receipt.pre_write_snapshot,
+            post_write_exists: receipt.post_write_exists,
             post_write_snapshot: receipt.post_write_snapshot,
             write_key: receipt.write_key,
         };
@@ -94,7 +100,9 @@ struct IssueWikiWriteReceiptWire {
     page_path: String,
     relative_file_path: String,
     apply_key: ContentHashHex,
+    pre_write_exists: bool,
     pre_write_snapshot: IssueWikiPageSnapshot,
+    post_write_exists: bool,
     post_write_snapshot: IssueWikiPageSnapshot,
     write_key: ContentHashHex,
 }
@@ -143,7 +151,26 @@ impl IssueWikiWriteReceipt {
             ));
         }
         match self.action {
-            IssueWikiWriteAction::Create | IssueWikiWriteAction::Update => {
+            IssueWikiWriteAction::Create => {
+                if self.pre_write_exists {
+                    return Err("issue_wiki write_create_pre_exists".to_owned());
+                }
+                if !self.post_write_exists {
+                    return Err("issue_wiki write_create_post_missing".to_owned());
+                }
+                if self.pre_write_snapshot == self.post_write_snapshot {
+                    return Err(
+                        "issue_wiki write_create_snapshot_mismatch pre_and_post_equal".to_owned(),
+                    );
+                }
+            }
+            IssueWikiWriteAction::Update => {
+                if !self.pre_write_exists {
+                    return Err("issue_wiki write_update_pre_missing".to_owned());
+                }
+                if !self.post_write_exists {
+                    return Err("issue_wiki write_update_post_missing".to_owned());
+                }
                 if self.pre_write_snapshot == self.post_write_snapshot {
                     return Err(format!(
                         "issue_wiki write_action_snapshot_mismatch action={} pre_and_post_equal",
@@ -152,6 +179,11 @@ impl IssueWikiWriteReceipt {
                 }
             }
             IssueWikiWriteAction::Noop => {
+                if self.pre_write_exists != self.post_write_exists {
+                    return Err(
+                        "issue_wiki write_noop_existence_mismatch pre_and_post_differ".to_owned(),
+                    );
+                }
                 if self.pre_write_snapshot != self.post_write_snapshot {
                     return Err(
                         "issue_wiki write_noop_snapshot_mismatch pre_and_post_differ".to_owned(),
@@ -259,7 +291,7 @@ pub fn materialize_issue_wiki_apply_receipt(
 
     let relative = relative_page_file_path(&receipt.actual_snapshot.page_path)?;
     let path = wiki_root.as_ref().join(&relative);
-    let before = read_or_empty(&path)?;
+    let (pre_write_exists, before) = read_existing_or_empty(&path)?;
     let pre_write_snapshot =
         IssueWikiPageSnapshot::from_page_bytes(receipt.actual_snapshot.page_path.clone(), &before);
     let target = render_issue_wiki_page(&receipt);
@@ -296,7 +328,7 @@ pub fn materialize_issue_wiki_apply_receipt(
         })?;
     }
 
-    let after = read_or_empty(&path)?;
+    let (post_write_exists, after) = read_existing_or_empty(&path)?;
     let post_write_snapshot =
         IssueWikiPageSnapshot::from_page_bytes(receipt.actual_snapshot.page_path.clone(), &after);
     let relative_file_path = relative.to_string_lossy().replace('\\', "/");
@@ -306,7 +338,9 @@ pub fn materialize_issue_wiki_apply_receipt(
         page_path: receipt.actual_snapshot.page_path.clone(),
         relative_file_path,
         apply_key: receipt.apply_key.clone(),
+        pre_write_exists,
         pre_write_snapshot,
+        post_write_exists,
         post_write_snapshot,
         write_key: ContentHashHex::new("0".repeat(64))
             .expect("zero placeholder is valid lowercase hex"),
@@ -365,10 +399,10 @@ pub fn render_issue_wiki_page(receipt: &IssueWikiApplyReceipt) -> String {
     out
 }
 
-fn read_or_empty(path: &Path) -> Result<Vec<u8>, IssueWikiWriteError> {
+fn read_existing_or_empty(path: &Path) -> Result<(bool, Vec<u8>), IssueWikiWriteError> {
     match fs::read(path) {
-        Ok(bytes) => Ok(bytes),
-        Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Ok(bytes) => Ok((true, bytes)),
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok((false, Vec::new())),
         Err(source) => Err(IssueWikiWriteError::Io {
             path: path.to_path_buf(),
             source,
@@ -425,7 +459,9 @@ fn issue_wiki_write_key(receipt: &IssueWikiWriteReceipt) -> ContentHashHex {
     hash_part(&mut hasher, receipt.page_path.as_bytes());
     hash_part(&mut hasher, receipt.relative_file_path.as_bytes());
     hash_part(&mut hasher, receipt.apply_key.as_str().as_bytes());
+    hash_part(&mut hasher, &[u8::from(receipt.pre_write_exists)]);
     hash_page_snapshot(&mut hasher, &receipt.pre_write_snapshot);
+    hash_part(&mut hasher, &[u8::from(receipt.post_write_exists)]);
     hash_page_snapshot(&mut hasher, &receipt.post_write_snapshot);
     ContentHashHex::new(hasher.finalize().to_hex().to_string())
         .expect("blake3 lowercase hex is always valid")
@@ -615,7 +651,11 @@ mod tests {
             fs::read_to_string(dir.path().join("Attractor/Issue-to-Wiki-Migration.md")).unwrap();
 
         assert_eq!(first.action, IssueWikiWriteAction::Create);
+        assert!(!first.pre_write_exists);
+        assert!(first.post_write_exists);
         assert_eq!(second.action, IssueWikiWriteAction::Noop);
+        assert!(second.pre_write_exists);
+        assert!(second.post_write_exists);
         assert_eq!(first.post_write_snapshot, second.pre_write_snapshot);
         assert!(page.contains("# Track issue-to-wiki migration contract"));
         assert!(page.contains("wiki:Attractor/Issue-to-Wiki-Migration"));
@@ -640,6 +680,8 @@ mod tests {
 
         assert_eq!(receipt.dry_run_action, IssueWikiMutationAction::Update);
         assert_eq!(write.action, IssueWikiWriteAction::Update);
+        assert!(write.pre_write_exists);
+        assert!(write.post_write_exists);
         assert!(page.contains("# Track issue-to-wiki migration contract"));
     }
 
@@ -655,6 +697,8 @@ mod tests {
         let write = materialize_issue_wiki_apply_receipt(dir.path(), &receipt).unwrap();
 
         assert_eq!(write.action, IssueWikiWriteAction::Noop);
+        assert!(write.pre_write_exists);
+        assert!(write.post_write_exists);
         assert_eq!(write.pre_write_snapshot, write.post_write_snapshot);
     }
 
@@ -728,7 +772,23 @@ mod tests {
 
         let err = serde_json::from_value::<IssueWikiWriteReceipt>(value).unwrap_err();
 
-        assert!(err.to_string().contains("write_noop_snapshot_mismatch"));
+        assert!(err.to_string().contains("write_noop_existence_mismatch"));
+    }
+
+    #[test]
+    fn write_receipt_rejects_create_to_update_tamper_even_with_recomputed_key() {
+        let dir = TestDir::new();
+        let receipt = receipt_for(None, b"", b"");
+        let mut write = materialize_issue_wiki_apply_receipt(dir.path(), &receipt).unwrap();
+        assert_eq!(write.action, IssueWikiWriteAction::Create);
+        assert!(!write.pre_write_exists);
+        write.action = IssueWikiWriteAction::Update;
+        write.write_key = issue_wiki_write_key(&write);
+        let value = serde_json::to_value(write).unwrap();
+
+        let err = serde_json::from_value::<IssueWikiWriteReceipt>(value).unwrap_err();
+
+        assert!(err.to_string().contains("write_update_pre_missing"));
     }
 
     #[test]
