@@ -13,6 +13,9 @@ use std::fmt;
 /// Stable schema id for issue-to-wiki migration projections.
 pub const ISSUE_WIKI_SCHEMA_ID_V0: &str = "attractor.issue_wiki.projection.v0";
 
+/// Stable schema id for issue-to-wiki dry-run mutation plans.
+pub const ISSUE_WIKI_MUTATION_PLAN_SCHEMA_ID_V0: &str = "attractor.issue_wiki.mutation_plan.v0";
+
 /// Source issue identity and content hash.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IssueWikiSource {
@@ -278,6 +281,105 @@ pub struct IssueWikiMutationReference {
     pub span: SourceSpan,
 }
 
+/// Existing wiki note snapshot used only for dry-run planning.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueWikiCurrentNote {
+    /// Stable wiki note identity.
+    pub identity: String,
+    /// Current wiki note title.
+    pub title: String,
+    /// Current reference targets already present on the note.
+    pub references: Vec<String>,
+}
+
+/// Deterministic wiki mutation action selected by the dry-run planner.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IssueWikiMutationAction {
+    /// No current note exists for the accepted issue row.
+    Create,
+    /// A note with the same identity exists but its typed content differs.
+    Update,
+    /// The current note already matches the accepted issue row.
+    Noop,
+    /// The caller supplied a current note for a different identity.
+    Conflict,
+}
+
+/// Dry-run wiki mutation receipt produced from an accepted issue-to-wiki row.
+///
+/// This receipt is the first consumer-facing mutation contract: it preserves the
+/// typed row's source and conformance receipts, chooses a deterministic action,
+/// and carries no raw issue body.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct IssueWikiMutationDryRunReceipt {
+    /// Schema id this dry-run receipt used.
+    pub schema_id: String,
+    /// Planned wiki mutation action.
+    pub action: IssueWikiMutationAction,
+    /// Stable wiki note identity.
+    pub identity: String,
+    /// Wiki note title from the accepted row.
+    pub title: String,
+    /// Reference targets from the accepted row.
+    pub references: Vec<IssueWikiMutationReference>,
+    /// Source artifact the mutation plan was derived from.
+    pub source_ref: String,
+    /// Source hash carried by the accepted row.
+    pub source_hash: ContentHashHex,
+    /// Extractor-time value/span/source-hash receipts preserved for the writer.
+    pub conformance_receipts: Vec<IssueWikiConformanceReceipt>,
+    /// Stable transform identifier from the accepted row.
+    pub transform_id: String,
+    /// Deterministic key for idempotent dry-run replay.
+    pub idempotency_key: ContentHashHex,
+    /// Conflict reason when `action == conflict`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conflict_reason: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for IssueWikiMutationDryRunReceipt {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let receipt = IssueWikiMutationDryRunReceiptWire::deserialize(deserializer)?;
+        let receipt = Self {
+            schema_id: receipt.schema_id,
+            action: receipt.action,
+            identity: receipt.identity,
+            title: receipt.title,
+            references: receipt.references,
+            source_ref: receipt.source_ref,
+            source_hash: receipt.source_hash,
+            conformance_receipts: receipt.conformance_receipts,
+            transform_id: receipt.transform_id,
+            idempotency_key: receipt.idempotency_key,
+            conflict_reason: receipt.conflict_reason,
+        };
+        receipt
+            .validate_idempotency_key()
+            .map_err(serde::de::Error::custom)?;
+        Ok(receipt)
+    }
+}
+
+#[derive(Deserialize)]
+struct IssueWikiMutationDryRunReceiptWire {
+    schema_id: String,
+    action: IssueWikiMutationAction,
+    identity: String,
+    title: String,
+    references: Vec<IssueWikiMutationReference>,
+    source_ref: String,
+    source_hash: ContentHashHex,
+    conformance_receipts: Vec<IssueWikiConformanceReceipt>,
+    transform_id: String,
+    idempotency_key: ContentHashHex,
+    #[serde(default)]
+    conflict_reason: Option<String>,
+}
+
 /// Why an issue-to-wiki projection cannot produce a store mutation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum IssueWikiProjectionError {
@@ -329,22 +431,78 @@ pub enum IssueWikiProjectionError {
         /// Byte offset where the cited source span ends.
         end: u64,
     },
+    /// A non-accepted projection row was passed to the mutation planner.
+    NonAcceptedProjection {
+        /// Projection state that was refused.
+        state: IssueWikiProjectionState,
+        /// Source artifact carried by the refused row.
+        source_ref: String,
+    },
+    /// The accepted row's stored value/hash receipts no longer self-prove.
+    ConformanceMismatch {
+        /// Machine-readable mismatch reason.
+        reason: String,
+    },
+}
+
+/// Plan a dry-run wiki mutation from a projection result.
+///
+/// Only accepted rows can produce a mutation receipt. Stale and malformed rows
+/// stay visible for routing but are refused before a mutation plan exists.
+pub fn plan_issue_wiki_mutation(
+    projection: &IssueWikiProjectionResult,
+    current_note: Option<&IssueWikiCurrentNote>,
+) -> Result<IssueWikiMutationDryRunReceipt, IssueWikiProjectionError> {
+    let accepted = match projection {
+        IssueWikiProjectionResult::Accepted(row) => row.as_ref(),
+        IssueWikiProjectionResult::Stale(row) => {
+            return Err(IssueWikiProjectionError::NonAcceptedProjection {
+                state: IssueWikiProjectionState::Stale,
+                source_ref: row.source_ref.clone(),
+            });
+        }
+        IssueWikiProjectionResult::Malformed(row) => {
+            return Err(IssueWikiProjectionError::NonAcceptedProjection {
+                state: IssueWikiProjectionState::Malformed,
+                source_ref: row.source_ref.clone(),
+            });
+        }
+    };
+
+    accepted.to_mutation_dry_run(current_note)
 }
 
 impl IssueWikiAccepted {
     fn validate_offline_value_hashes(&self) -> Result<(), String> {
-        self.expect_offline_receipt("identity", &self.note.identity.value)?;
-        self.expect_offline_receipt("title", &self.note.title.value)?;
+        self.expect_offline_receipt(
+            "identity",
+            &self.note.identity.value,
+            &self.note.identity.span,
+        )?;
+        self.expect_offline_receipt("title", &self.note.title.value, &self.note.title.span)?;
         for (idx, reference) in self.note.references.iter().enumerate() {
-            self.expect_offline_receipt(&format!("references[{idx}].target"), &reference.target)?;
+            self.expect_offline_receipt(
+                &format!("references[{idx}].target"),
+                &reference.target,
+                &reference.span,
+            )?;
             if let Some(label) = &reference.label {
-                self.expect_offline_receipt(&format!("references[{idx}].label"), &label.value)?;
+                self.expect_offline_receipt(
+                    &format!("references[{idx}].label"),
+                    &label.value,
+                    &label.span,
+                )?;
             }
         }
         Ok(())
     }
 
-    fn expect_offline_receipt(&self, field_path: &str, value: &str) -> Result<(), String> {
+    fn expect_offline_receipt(
+        &self,
+        field_path: &str,
+        value: &str,
+        span: &SourceSpan,
+    ) -> Result<(), String> {
         let receipt = self
             .conformance_receipts
             .iter()
@@ -362,6 +520,12 @@ impl IssueWikiAccepted {
                 "issue_wiki conformance_span_hash_mismatch field={field_path} expected={} actual={}",
                 self.source.source_hash.as_str(),
                 receipt.span.source_hash.as_str()
+            ));
+        }
+        if receipt.span != *span {
+            return Err(format!(
+                "issue_wiki conformance_span_mismatch field={field_path} expected={}-{} actual={}-{}",
+                span.start, span.end, receipt.span.start, receipt.span.end
             ));
         }
         let expected_hash = issue_wiki_value_hash(value);
@@ -428,6 +592,60 @@ impl IssueWikiAccepted {
             source_hash: self.source.source_hash.clone(),
             transform_id: self.envelope.transform_id.clone(),
             source_spans,
+        })
+    }
+
+    /// Convert accepted projection evidence into a deterministic dry-run wiki
+    /// mutation receipt.
+    ///
+    /// # Errors
+    /// Returns [`IssueWikiProjectionError`] when the accepted row is internally
+    /// inconsistent. Stale and malformed projection results must be handled by
+    /// [`plan_issue_wiki_mutation`], which refuses them before this method is
+    /// called.
+    pub fn to_mutation_dry_run(
+        &self,
+        current_note: Option<&IssueWikiCurrentNote>,
+    ) -> Result<IssueWikiMutationDryRunReceipt, IssueWikiProjectionError> {
+        self.validate_offline_value_hashes()
+            .map_err(|reason| IssueWikiProjectionError::ConformanceMismatch { reason })?;
+        let mutation = self.to_store_mutation(&self.source.source_hash)?;
+        let planned_reference_targets = reference_targets(&mutation);
+        let action = match current_note {
+            None => IssueWikiMutationAction::Create,
+            Some(note) if note.identity != mutation.identity => IssueWikiMutationAction::Conflict,
+            Some(note)
+                if note.title == mutation.title
+                    && note.references.as_slice() == planned_reference_targets.as_slice() =>
+            {
+                IssueWikiMutationAction::Noop
+            }
+            Some(_) => IssueWikiMutationAction::Update,
+        };
+        let conflict_reason = match (action, current_note) {
+            (IssueWikiMutationAction::Conflict, Some(note)) => Some(format!(
+                "issue_wiki identity_conflict expected={} actual={}",
+                mutation.identity, note.identity
+            )),
+            _ => None,
+        };
+        let receipt = IssueWikiMutationDryRunReceipt {
+            schema_id: ISSUE_WIKI_MUTATION_PLAN_SCHEMA_ID_V0.to_owned(),
+            action,
+            identity: mutation.identity,
+            title: mutation.title,
+            references: mutation.references,
+            source_ref: mutation.source_ref,
+            source_hash: mutation.source_hash,
+            conformance_receipts: self.conformance_receipts.clone(),
+            transform_id: mutation.transform_id,
+            idempotency_key: ContentHashHex::new("0".repeat(64))
+                .expect("zero placeholder is valid lowercase hex"),
+            conflict_reason,
+        };
+        Ok(IssueWikiMutationDryRunReceipt {
+            idempotency_key: issue_wiki_mutation_idempotency_key(&receipt),
+            ..receipt
         })
     }
 
@@ -500,6 +718,69 @@ impl IssueWikiAccepted {
     }
 }
 
+impl IssueWikiMutationDryRunReceipt {
+    fn validate_idempotency_key(&self) -> Result<(), String> {
+        let expected = issue_wiki_mutation_idempotency_key(self);
+        if self.idempotency_key == expected {
+            Ok(())
+        } else {
+            Err(format!(
+                "issue_wiki idempotency_key_mismatch expected={} actual={}",
+                expected.as_str(),
+                self.idempotency_key.as_str()
+            ))
+        }
+    }
+}
+
+fn reference_targets(mutation: &IssueWikiStoreMutation) -> Vec<String> {
+    mutation
+        .references
+        .iter()
+        .map(|reference| reference.target.clone())
+        .collect()
+}
+
+fn issue_wiki_mutation_idempotency_key(receipt: &IssueWikiMutationDryRunReceipt) -> ContentHashHex {
+    let mut hasher = blake3::Hasher::new();
+    hash_part(&mut hasher, receipt.schema_id.as_bytes());
+    hash_part(&mut hasher, receipt.action.as_str().as_bytes());
+    hash_part(&mut hasher, receipt.identity.as_bytes());
+    hash_part(&mut hasher, receipt.title.as_bytes());
+    for reference in &receipt.references {
+        hash_part(&mut hasher, reference.target.as_bytes());
+        hash_span(&mut hasher, &reference.span);
+    }
+    hash_part(&mut hasher, receipt.source_ref.as_bytes());
+    hash_part(&mut hasher, receipt.source_hash.as_str().as_bytes());
+    for conformance in &receipt.conformance_receipts {
+        hash_part(&mut hasher, conformance.source_hash.as_str().as_bytes());
+        hash_part(&mut hasher, conformance.field_path.as_bytes());
+        hash_part(&mut hasher, conformance.value_hash.as_str().as_bytes());
+        hash_span(&mut hasher, &conformance.span);
+    }
+    hash_part(&mut hasher, receipt.transform_id.as_bytes());
+    if let Some(reason) = &receipt.conflict_reason {
+        hash_part(&mut hasher, reason.as_bytes());
+    }
+    ContentHashHex::new(hasher.finalize().to_hex().to_string())
+        .expect("blake3 lowercase hex is always valid")
+}
+
+fn hash_span(hasher: &mut blake3::Hasher, span: &SourceSpan) {
+    hash_part(hasher, span.source_hash.as_str().as_bytes());
+    hash_part(hasher, &span.start.to_le_bytes());
+    hash_part(hasher, &span.end.to_le_bytes());
+    if let Some(label) = &span.label {
+        hash_part(hasher, label.as_bytes());
+    }
+}
+
+fn hash_part(hasher: &mut blake3::Hasher, bytes: &[u8]) {
+    hasher.update(&(bytes.len() as u64).to_le_bytes());
+    hasher.update(bytes);
+}
+
 impl fmt::Display for IssueWikiProjectionError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -547,6 +828,13 @@ impl fmt::Display for IssueWikiProjectionError {
                 f,
                 "issue_wiki span_range_invalid field={field_path} start={start} end={end}"
             ),
+            Self::NonAcceptedProjection { state, source_ref } => write!(
+                f,
+                "issue_wiki non_accepted_projection state={state} source_ref={source_ref}"
+            ),
+            Self::ConformanceMismatch { reason } => {
+                write!(f, "issue_wiki conformance_mismatch {reason}")
+            }
         }
     }
 }
@@ -559,6 +847,17 @@ impl fmt::Display for IssueWikiProjectionState {
             Self::Accepted => f.write_str("accepted"),
             Self::Stale => f.write_str("stale"),
             Self::Malformed => f.write_str("malformed"),
+        }
+    }
+}
+
+impl IssueWikiMutationAction {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Create => "create",
+            Self::Update => "update",
+            Self::Noop => "noop",
+            Self::Conflict => "conflict",
         }
     }
 }
@@ -713,6 +1012,164 @@ mod tests {
         );
         assert_eq!(mutation.source_hash, row.source.source_hash);
         assert_eq!(mutation.source_spans.len(), 4);
+    }
+
+    #[test]
+    fn accepted_projection_builds_dry_run_create_receipt_without_raw_body() {
+        let row = accepted();
+        let projection = IssueWikiProjectionResult::Accepted(Box::new(row.clone()));
+
+        let receipt = plan_issue_wiki_mutation(&projection, None).unwrap();
+        let replayed = plan_issue_wiki_mutation(&projection, None).unwrap();
+        let json = serde_json::to_string(&receipt).unwrap();
+
+        assert_eq!(receipt.schema_id, ISSUE_WIKI_MUTATION_PLAN_SCHEMA_ID_V0);
+        assert_eq!(receipt.action, IssueWikiMutationAction::Create);
+        assert_eq!(
+            receipt.identity,
+            "attractor.issue.43.issue-to-wiki-migration"
+        );
+        assert_eq!(receipt.source_ref, row.source.source_ref);
+        assert_eq!(receipt.source_hash, row.source.source_hash);
+        assert_eq!(receipt.conformance_receipts, row.conformance_receipts);
+        assert_eq!(receipt.idempotency_key, replayed.idempotency_key);
+        assert!(!json.contains("RAW ISSUE BODY"));
+        assert!(!json.contains("raw_issue_body"));
+    }
+
+    #[test]
+    fn dry_run_receipt_rejects_idempotency_key_tamper_on_deserialize() {
+        let row = accepted();
+        let projection = IssueWikiProjectionResult::Accepted(Box::new(row));
+        let receipt = plan_issue_wiki_mutation(&projection, None).unwrap();
+        let mut value = serde_json::to_value(receipt).unwrap();
+        value["idempotency_key"] = serde_json::Value::String(hash(9).as_str().to_owned());
+
+        let err = serde_json::from_value::<IssueWikiMutationDryRunReceipt>(value).unwrap_err();
+
+        assert!(err.to_string().contains("idempotency_key_mismatch"));
+    }
+
+    #[test]
+    fn accepted_row_rejects_typed_span_tamper_with_unchanged_receipt() {
+        let row = IssueWikiProjectionResult::Accepted(Box::new(accepted()));
+        let mut value = serde_json::to_value(row).unwrap();
+        value["row"]["note"]["title"]["span"]["start"] = serde_json::json!(34_u64);
+
+        let err = serde_json::from_value::<IssueWikiProjectionResult>(value).unwrap_err();
+
+        assert!(err
+            .to_string()
+            .contains("issue_wiki conformance_span_mismatch field=title"));
+    }
+
+    #[test]
+    fn accepted_projection_dry_run_is_idempotent_noop_for_matching_note() {
+        let row = accepted();
+        let current = IssueWikiCurrentNote {
+            identity: row.note.identity.value.clone(),
+            title: row.note.title.value.clone(),
+            references: row
+                .note
+                .references
+                .iter()
+                .map(|reference| reference.target.clone())
+                .collect(),
+        };
+        let projection = IssueWikiProjectionResult::Accepted(Box::new(row));
+
+        let first = plan_issue_wiki_mutation(&projection, Some(&current)).unwrap();
+        let second = plan_issue_wiki_mutation(&projection, Some(&current)).unwrap();
+
+        assert_eq!(first.action, IssueWikiMutationAction::Noop);
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn accepted_projection_dry_run_selects_update_for_changed_note() {
+        let row = accepted();
+        let current = IssueWikiCurrentNote {
+            identity: row.note.identity.value.clone(),
+            title: "Old title".to_owned(),
+            references: vec![],
+        };
+        let projection = IssueWikiProjectionResult::Accepted(Box::new(row));
+
+        let receipt = plan_issue_wiki_mutation(&projection, Some(&current)).unwrap();
+
+        assert_eq!(receipt.action, IssueWikiMutationAction::Update);
+        assert!(receipt.conflict_reason.is_none());
+    }
+
+    #[test]
+    fn accepted_projection_dry_run_selects_conflict_for_wrong_identity() {
+        let row = accepted();
+        let current = IssueWikiCurrentNote {
+            identity: "attractor.issue.99.other".to_owned(),
+            title: row.note.title.value.clone(),
+            references: row
+                .note
+                .references
+                .iter()
+                .map(|reference| reference.target.clone())
+                .collect(),
+        };
+        let projection = IssueWikiProjectionResult::Accepted(Box::new(row));
+
+        let receipt = plan_issue_wiki_mutation(&projection, Some(&current)).unwrap();
+
+        assert_eq!(receipt.action, IssueWikiMutationAction::Conflict);
+        assert!(receipt
+            .conflict_reason
+            .as_deref()
+            .unwrap()
+            .contains("identity_conflict"));
+    }
+
+    #[test]
+    fn stale_and_malformed_rows_refuse_dry_run_mutation() {
+        let stale = IssueWikiProjectionResult::Stale(Box::new(IssueWikiStale {
+            schema_id: ISSUE_WIKI_SCHEMA_ID_V0.to_owned(),
+            source_ref: "github:gwild/attractor#43".to_owned(),
+            expected_source_hash: hash(1),
+            actual_source_hash: hash(2),
+            envelope: envelope(IssueWikiProjectionState::Stale, hash(2)),
+        }));
+        let malformed = IssueWikiProjectionResult::Malformed(Box::new(IssueWikiMalformed {
+            schema_id: Some(ISSUE_WIKI_SCHEMA_ID_V0.to_owned()),
+            source_ref: "github:gwild/attractor#43".to_owned(),
+            reason: "missing_title_span".to_owned(),
+            field_refs: vec![field("title")],
+            envelope: envelope(IssueWikiProjectionState::Malformed, hash(3)),
+        }));
+
+        for (row, state) in [
+            (stale, IssueWikiProjectionState::Stale),
+            (malformed, IssueWikiProjectionState::Malformed),
+        ] {
+            let err = plan_issue_wiki_mutation(&row, None).unwrap_err();
+            assert!(matches!(
+                err,
+                IssueWikiProjectionError::NonAcceptedProjection { state: actual, .. }
+                if actual == state
+            ));
+            assert!(err.to_string().contains("non_accepted_projection"));
+        }
+    }
+
+    #[test]
+    fn dry_run_refuses_accepted_row_with_stale_value_hash_receipt() {
+        let mut row = accepted();
+        row.note.title.value = "Tampered title".to_owned();
+        let projection = IssueWikiProjectionResult::Accepted(Box::new(row));
+
+        let err = plan_issue_wiki_mutation(&projection, None).unwrap_err();
+
+        assert!(matches!(
+            err,
+            IssueWikiProjectionError::ConformanceMismatch { .. }
+        ));
+        assert!(err.to_string().contains("conformance_value_hash_mismatch"));
     }
 
     #[test]
