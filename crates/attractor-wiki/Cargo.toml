@@ -1,0 +1,16 @@
+[package]
+name = "attractor-wiki"
+version = "0.0.0"
+edition = "2021"
+# Local filesystem materializer only: no network, no git push, no OS-specific deps.
+# Kept at the portable 1.92 floor with attractor-proto.
+rust-version = "1.92"
+license = "MIT OR Apache-2.0"
+description = "No-network issue-wiki write boundary: materialize validated apply receipts into a caller-supplied wiki tree and emit durable write receipts."
+repository = "https://github.com/gwild/attractor"
+
+[dependencies]
+attractor-proto = { path = "../attractor-proto" }
+blake3 = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
