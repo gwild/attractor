@@ -80,6 +80,9 @@ impl<'de> Deserialize<'de> for IssueWikiWriteReceipt {
         receipt
             .validate_write_key()
             .map_err(serde::de::Error::custom)?;
+        receipt
+            .validate_structural_invariants()
+            .map_err(serde::de::Error::custom)?;
         Ok(receipt)
     }
 }
@@ -108,6 +111,55 @@ impl IssueWikiWriteReceipt {
                 self.write_key.as_str()
             ))
         }
+    }
+
+    fn validate_structural_invariants(&self) -> Result<(), String> {
+        if self.schema_id != ISSUE_WIKI_WRITE_RECEIPT_SCHEMA_ID_V0 {
+            return Err(format!(
+                "issue_wiki write_schema_mismatch expected={} actual={}",
+                ISSUE_WIKI_WRITE_RECEIPT_SCHEMA_ID_V0, self.schema_id
+            ));
+        }
+        if self.page_path != self.pre_write_snapshot.page_path {
+            return Err(format!(
+                "issue_wiki write_pre_snapshot_path_mismatch page_path={} snapshot_path={}",
+                self.page_path, self.pre_write_snapshot.page_path
+            ));
+        }
+        if self.page_path != self.post_write_snapshot.page_path {
+            return Err(format!(
+                "issue_wiki write_post_snapshot_path_mismatch page_path={} snapshot_path={}",
+                self.page_path, self.post_write_snapshot.page_path
+            ));
+        }
+        let expected_relative = relative_page_file_path(&self.page_path)
+            .map_err(|err| err.to_string())?
+            .to_string_lossy()
+            .replace('\\', "/");
+        if self.relative_file_path != expected_relative {
+            return Err(format!(
+                "issue_wiki write_relative_path_mismatch expected={} actual={}",
+                expected_relative, self.relative_file_path
+            ));
+        }
+        match self.action {
+            IssueWikiWriteAction::Create | IssueWikiWriteAction::Update => {
+                if self.pre_write_snapshot == self.post_write_snapshot {
+                    return Err(format!(
+                        "issue_wiki write_action_snapshot_mismatch action={} pre_and_post_equal",
+                        self.action.as_str()
+                    ));
+                }
+            }
+            IssueWikiWriteAction::Noop => {
+                if self.pre_write_snapshot != self.post_write_snapshot {
+                    return Err(
+                        "issue_wiki write_noop_snapshot_mismatch pre_and_post_differ".to_owned(),
+                    );
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -663,6 +715,34 @@ mod tests {
         let err = serde_json::from_value::<IssueWikiWriteReceipt>(value).unwrap_err();
 
         assert!(err.to_string().contains("write_key_mismatch"));
+    }
+
+    #[test]
+    fn write_receipt_rejects_structural_tamper_even_with_recomputed_key() {
+        let dir = TestDir::new();
+        let receipt = receipt_for(None, b"", b"");
+        let mut write = materialize_issue_wiki_apply_receipt(dir.path(), &receipt).unwrap();
+        write.action = IssueWikiWriteAction::Noop;
+        write.write_key = issue_wiki_write_key(&write);
+        let value = serde_json::to_value(write).unwrap();
+
+        let err = serde_json::from_value::<IssueWikiWriteReceipt>(value).unwrap_err();
+
+        assert!(err.to_string().contains("write_noop_snapshot_mismatch"));
+    }
+
+    #[test]
+    fn write_receipt_rejects_path_tamper_even_with_recomputed_key() {
+        let dir = TestDir::new();
+        let receipt = receipt_for(None, b"", b"");
+        let mut write = materialize_issue_wiki_apply_receipt(dir.path(), &receipt).unwrap();
+        write.relative_file_path = "Elsewhere.md".to_owned();
+        write.write_key = issue_wiki_write_key(&write);
+        let value = serde_json::to_value(write).unwrap();
+
+        let err = serde_json::from_value::<IssueWikiWriteReceipt>(value).unwrap_err();
+
+        assert!(err.to_string().contains("write_relative_path_mismatch"));
     }
 
     #[test]
