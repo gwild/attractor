@@ -19,6 +19,19 @@
 use serde::{Deserialize, Deserializer, Serialize};
 use std::fmt;
 
+/// Schema/evidence projection contract shared by Attractor consumers and
+/// external projectors.
+pub mod projection;
+
+pub use projection::{
+    ActionSet, ActionSetRef, ClaimFixtureHash, ClaimHash, CrossRepoContract, EvidenceCapability,
+    EvidenceEnvelope, FieldRef, FixtureManifestKind, GateMeetResult, GitBlobSha,
+    MiltonProjectorRef, ProjectionClaim, ProjectionInvalid, ProjectionOk, ProjectionResult,
+    ProjectionSchemaTuple, ProjectionStale, ProjectionState, ProjectionUnsupported,
+    ReceiptComparison, ReceiptFixtureHash, ReceiptHash, ReceiptInt, ReceiptStringList,
+    ScoreContribution, TypedReceipt, UnmappedGate, UnsupportedRemediation, PROJECTION_SCHEMA_ID_V0,
+};
+
 /// Portable content-hash representation on the wire.
 ///
 /// Core owns the concrete `ContentHash` bytes; the protocol layer keeps the
