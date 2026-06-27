@@ -109,6 +109,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "attractor-wiki"
+version = "0.0.0"
+dependencies = [
+ "attractor-proto",
+ "blake3",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "blake3"
 version = "1.8.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
