@@ -417,6 +417,11 @@ pub struct IssueWikiApplyReceipt {
     pub transform_id: String,
     /// Dry-run idempotency key this apply receipt consumes.
     pub dry_run_idempotency_key: ContentHashHex,
+    /// Original dry-run action whose payload is bound by `dry_run_idempotency_key`.
+    pub dry_run_action: IssueWikiMutationAction,
+    /// Original dry-run conflict reason bound by `dry_run_idempotency_key`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dry_run_conflict_reason: Option<String>,
     /// Target page snapshot the dry-run plan was computed against.
     pub expected_snapshot: IssueWikiPageSnapshot,
     /// Target page snapshot observed immediately before apply.
@@ -445,6 +450,8 @@ impl<'de> Deserialize<'de> for IssueWikiApplyReceipt {
             conformance_receipts: receipt.conformance_receipts,
             transform_id: receipt.transform_id,
             dry_run_idempotency_key: receipt.dry_run_idempotency_key,
+            dry_run_action: receipt.dry_run_action,
+            dry_run_conflict_reason: receipt.dry_run_conflict_reason,
             expected_snapshot: receipt.expected_snapshot,
             actual_snapshot: receipt.actual_snapshot,
             apply_key: receipt.apply_key,
@@ -452,6 +459,9 @@ impl<'de> Deserialize<'de> for IssueWikiApplyReceipt {
         };
         receipt
             .validate_apply_key()
+            .map_err(serde::de::Error::custom)?;
+        receipt
+            .validate_dry_run_idempotency_key()
             .map_err(serde::de::Error::custom)?;
         Ok(receipt)
     }
@@ -469,6 +479,9 @@ struct IssueWikiApplyReceiptWire {
     conformance_receipts: Vec<IssueWikiConformanceReceipt>,
     transform_id: String,
     dry_run_idempotency_key: ContentHashHex,
+    dry_run_action: IssueWikiMutationAction,
+    #[serde(default)]
+    dry_run_conflict_reason: Option<String>,
     expected_snapshot: IssueWikiPageSnapshot,
     actual_snapshot: IssueWikiPageSnapshot,
     apply_key: ContentHashHex,
@@ -668,6 +681,8 @@ pub fn apply_issue_wiki_mutation_dry_run(
         conformance_receipts: dry_run.conformance_receipts.clone(),
         transform_id: dry_run.transform_id.clone(),
         dry_run_idempotency_key: dry_run.idempotency_key.clone(),
+        dry_run_action: dry_run.action,
+        dry_run_conflict_reason: dry_run.conflict_reason.clone(),
         expected_snapshot: expected_snapshot.clone(),
         actual_snapshot: actual_snapshot.clone(),
         apply_key: ContentHashHex::new("0".repeat(64))
@@ -954,6 +969,23 @@ impl IssueWikiApplyReceipt {
             ))
         }
     }
+
+    fn validate_dry_run_idempotency_key(&self) -> Result<(), String> {
+        let dry_run = IssueWikiMutationDryRunReceipt {
+            schema_id: ISSUE_WIKI_MUTATION_PLAN_SCHEMA_ID_V0.to_owned(),
+            action: self.dry_run_action,
+            identity: self.identity.clone(),
+            title: self.title.clone(),
+            references: self.references.clone(),
+            source_ref: self.source_ref.clone(),
+            source_hash: self.source_hash.clone(),
+            conformance_receipts: self.conformance_receipts.clone(),
+            transform_id: self.transform_id.clone(),
+            idempotency_key: self.dry_run_idempotency_key.clone(),
+            conflict_reason: self.dry_run_conflict_reason.clone(),
+        };
+        dry_run.validate_idempotency_key()
+    }
 }
 
 fn reference_targets(mutation: &IssueWikiStoreMutation) -> Vec<String> {
@@ -1013,6 +1045,10 @@ fn issue_wiki_apply_key(receipt: &IssueWikiApplyReceipt) -> ContentHashHex {
         &mut hasher,
         receipt.dry_run_idempotency_key.as_str().as_bytes(),
     );
+    hash_part(&mut hasher, receipt.dry_run_action.as_str().as_bytes());
+    if let Some(reason) = &receipt.dry_run_conflict_reason {
+        hash_part(&mut hasher, reason.as_bytes());
+    }
     hash_page_snapshot(&mut hasher, &receipt.expected_snapshot);
     hash_page_snapshot(&mut hasher, &receipt.actual_snapshot);
     if let Some(reason) = &receipt.conflict_reason {
@@ -1359,6 +1395,8 @@ mod tests {
         assert_eq!(receipt.source_hash, row.source.source_hash);
         assert_eq!(receipt.conformance_receipts, row.conformance_receipts);
         assert_eq!(receipt.dry_run_idempotency_key, dry_run.idempotency_key);
+        assert_eq!(receipt.dry_run_action, dry_run.action);
+        assert_eq!(receipt.dry_run_conflict_reason, dry_run.conflict_reason);
         assert_eq!(receipt.expected_snapshot, snapshot);
         assert_eq!(receipt.actual_snapshot, snapshot);
         assert_eq!(receipt.apply_key, replayed.apply_key);
@@ -1441,6 +1479,23 @@ mod tests {
         let err = serde_json::from_value::<IssueWikiApplyReceipt>(value).unwrap_err();
 
         assert!(err.to_string().contains("apply_key_mismatch"));
+    }
+
+    #[test]
+    fn apply_receipt_rejects_dry_run_payload_tamper_even_with_recomputed_apply_key() {
+        let row = accepted();
+        let projection = IssueWikiProjectionResult::Accepted(Box::new(row));
+        let dry_run = plan_issue_wiki_mutation(&projection, None).unwrap();
+        let snapshot = page_snapshot("Attractor/Issue-to-Wiki-Migration", b"");
+        let mut receipt =
+            apply_issue_wiki_mutation_dry_run(&dry_run, &snapshot, &snapshot).unwrap();
+        receipt.title = "Tampered title".to_owned();
+        receipt.apply_key = issue_wiki_apply_key(&receipt);
+        let value = serde_json::to_value(receipt).unwrap();
+
+        let err = serde_json::from_value::<IssueWikiApplyReceipt>(value).unwrap_err();
+
+        assert!(err.to_string().contains("idempotency_key_mismatch"));
     }
 
     #[test]
