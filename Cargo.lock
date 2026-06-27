@@ -92,6 +92,8 @@ dependencies = [
  "attractor-core",
  "attractor-projector",
  "attractor-proto",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

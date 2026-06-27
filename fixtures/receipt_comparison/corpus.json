@@ -1,0 +1,126 @@
+[
+  {
+    "id": "known_9_vs_known_11_mismatches_passed_count",
+    "claim": {
+      "expected_fields": ["passed_count"],
+      "passed_count": { "state": "known", "value": 11 }
+    },
+    "receipt": {
+      "passed_count": { "state": "known", "value": 9 }
+    },
+    "expect": {
+      "kind": "mismatch",
+      "mismatch_fields": ["passed_count"]
+    }
+  },
+  {
+    "id": "unknown_receipt_passed_count_never_clears",
+    "claim": {
+      "expected_fields": ["passed_count"],
+      "passed_count": { "state": "known", "value": 11 }
+    },
+    "receipt": {
+      "passed_count": {
+        "state": "unknown",
+        "reason": "receipt_incomplete",
+        "field_ref": { "path": "passed_count" }
+      }
+    },
+    "forbid": {
+      "allowed": ["incomplete", "needs_reexec"]
+    }
+  },
+  {
+    "id": "unknown_claim_and_receipt_passed_count_never_equals",
+    "claim": {
+      "expected_fields": ["passed_count"],
+      "passed_count": {
+        "state": "unknown",
+        "reason": "claim_missing_expected_count",
+        "field_ref": { "path": "passed_count" }
+      }
+    },
+    "receipt": {
+      "passed_count": {
+        "state": "unknown",
+        "reason": "receipt_parser_ambiguous_output",
+        "field_ref": { "path": "passed_count" }
+      }
+    },
+    "forbid": {
+      "allowed": ["incomplete", "needs_reexec"]
+    }
+  },
+  {
+    "id": "known_equal_load_bearing_fields_clear",
+    "claim": {
+      "expected_fields": [
+        "exit",
+        "passed_count",
+        "failed_count",
+        "collected_count",
+        "suite_ids"
+      ],
+      "exit": { "state": "known", "value": 0 },
+      "passed_count": { "state": "known", "value": 11 },
+      "failed_count": { "state": "known", "value": 0 },
+      "collected_count": { "state": "known", "value": 11 },
+      "suite_ids": {
+        "state": "known",
+        "value": ["tests/test_start_service_reaps_on_restart.py"]
+      }
+    },
+    "receipt": {
+      "exit": { "state": "known", "value": 0 },
+      "passed_count": { "state": "known", "value": 11 },
+      "failed_count": { "state": "known", "value": 0 },
+      "collected_count": { "state": "known", "value": 11 },
+      "suite_ids": {
+        "state": "known",
+        "value": ["tests/test_start_service_reaps_on_restart.py"]
+      }
+    },
+    "expect": {
+      "kind": "equal"
+    }
+  },
+  {
+    "id": "empty_expected_fields_never_clears",
+    "claim": {
+      "expected_fields": []
+    },
+    "receipt": {},
+    "forbid": {
+      "allowed": ["incomplete", "needs_reexec"]
+    }
+  },
+  {
+    "id": "non_covering_expected_fields_never_clears",
+    "claim": {
+      "expected_fields": ["exit"],
+      "exit": { "state": "known", "value": 0 },
+      "passed_count": { "state": "known", "value": 11 }
+    },
+    "receipt": {
+      "exit": { "state": "known", "value": 0 },
+      "passed_count": { "state": "known", "value": 9 }
+    },
+    "forbid": {
+      "allowed": ["incomplete", "needs_reexec"]
+    }
+  },
+  {
+    "id": "receipt_only_non_covering_expected_fields_never_clears",
+    "claim": {
+      "expected_fields": ["exit"],
+      "exit": { "state": "known", "value": 0 }
+    },
+    "receipt": {
+      "exit": { "state": "known", "value": 0 },
+      "passed_count": { "state": "known", "value": 9 }
+    },
+    "forbid": {
+      "allowed": ["incomplete", "needs_reexec"]
+    }
+  }
+]
