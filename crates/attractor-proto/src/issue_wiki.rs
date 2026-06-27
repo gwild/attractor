@@ -463,6 +463,9 @@ impl<'de> Deserialize<'de> for IssueWikiApplyReceipt {
         receipt
             .validate_dry_run_idempotency_key()
             .map_err(serde::de::Error::custom)?;
+        receipt
+            .validate_snapshot_action()
+            .map_err(serde::de::Error::custom)?;
         Ok(receipt)
     }
 }
@@ -653,23 +656,12 @@ pub fn apply_issue_wiki_mutation_dry_run(
     dry_run
         .validate_idempotency_key()
         .map_err(|reason| IssueWikiProjectionError::ReceiptMismatch { reason })?;
-    let mut action = IssueWikiApplyAction::from(dry_run.action);
-    let mut conflict_reason = dry_run.conflict_reason.clone();
-    if expected_snapshot.page_path != actual_snapshot.page_path {
-        action = IssueWikiApplyAction::Conflict;
-        conflict_reason = Some(format!(
-            "issue_wiki snapshot_path_mismatch expected={} actual={}",
-            expected_snapshot.page_path, actual_snapshot.page_path
-        ));
-    } else if expected_snapshot.page_hash != actual_snapshot.page_hash {
-        action = IssueWikiApplyAction::Conflict;
-        conflict_reason = Some(format!(
-            "issue_wiki snapshot_hash_mismatch page_path={} expected={} actual={}",
-            expected_snapshot.page_path,
-            expected_snapshot.page_hash.as_str(),
-            actual_snapshot.page_hash.as_str()
-        ));
-    }
+    let (action, conflict_reason) = issue_wiki_expected_apply_outcome(
+        dry_run.action,
+        dry_run.conflict_reason.as_deref(),
+        expected_snapshot,
+        actual_snapshot,
+    );
     let receipt = IssueWikiApplyReceipt {
         schema_id: ISSUE_WIKI_APPLY_RECEIPT_SCHEMA_ID_V0.to_owned(),
         action,
@@ -986,6 +978,30 @@ impl IssueWikiApplyReceipt {
         };
         dry_run.validate_idempotency_key()
     }
+
+    fn validate_snapshot_action(&self) -> Result<(), String> {
+        let (expected_action, expected_reason) = issue_wiki_expected_apply_outcome(
+            self.dry_run_action,
+            self.dry_run_conflict_reason.as_deref(),
+            &self.expected_snapshot,
+            &self.actual_snapshot,
+        );
+        if self.action != expected_action {
+            return Err(format!(
+                "issue_wiki apply_action_mismatch expected={} actual={}",
+                expected_action.as_str(),
+                self.action.as_str()
+            ));
+        }
+        if self.conflict_reason.as_deref() != expected_reason.as_deref() {
+            return Err(format!(
+                "issue_wiki apply_conflict_reason_mismatch expected={} actual={}",
+                expected_reason.as_deref().unwrap_or("<none>"),
+                self.conflict_reason.as_deref().unwrap_or("<none>")
+            ));
+        }
+        Ok(())
+    }
 }
 
 fn reference_targets(mutation: &IssueWikiStoreMutation) -> Vec<String> {
@@ -994,6 +1010,38 @@ fn reference_targets(mutation: &IssueWikiStoreMutation) -> Vec<String> {
         .iter()
         .map(|reference| reference.target.clone())
         .collect()
+}
+
+fn issue_wiki_expected_apply_outcome(
+    dry_run_action: IssueWikiMutationAction,
+    dry_run_conflict_reason: Option<&str>,
+    expected_snapshot: &IssueWikiPageSnapshot,
+    actual_snapshot: &IssueWikiPageSnapshot,
+) -> (IssueWikiApplyAction, Option<String>) {
+    if expected_snapshot.page_path != actual_snapshot.page_path {
+        (
+            IssueWikiApplyAction::Conflict,
+            Some(format!(
+                "issue_wiki snapshot_path_mismatch expected={} actual={}",
+                expected_snapshot.page_path, actual_snapshot.page_path
+            )),
+        )
+    } else if expected_snapshot.page_hash != actual_snapshot.page_hash {
+        (
+            IssueWikiApplyAction::Conflict,
+            Some(format!(
+                "issue_wiki snapshot_hash_mismatch page_path={} expected={} actual={}",
+                expected_snapshot.page_path,
+                expected_snapshot.page_hash.as_str(),
+                actual_snapshot.page_hash.as_str()
+            )),
+        )
+    } else {
+        (
+            IssueWikiApplyAction::from(dry_run_action),
+            dry_run_conflict_reason.map(str::to_owned),
+        )
+    }
 }
 
 fn issue_wiki_mutation_idempotency_key(receipt: &IssueWikiMutationDryRunReceipt) -> ContentHashHex {
@@ -1496,6 +1544,24 @@ mod tests {
         let err = serde_json::from_value::<IssueWikiApplyReceipt>(value).unwrap_err();
 
         assert!(err.to_string().contains("idempotency_key_mismatch"));
+    }
+
+    #[test]
+    fn apply_receipt_rejects_snapshot_action_tamper_even_with_recomputed_apply_key() {
+        let row = accepted();
+        let projection = IssueWikiProjectionResult::Accepted(Box::new(row));
+        let dry_run = plan_issue_wiki_mutation(&projection, None).unwrap();
+        let expected = page_snapshot("Attractor/Issue-to-Wiki-Migration", b"old page bytes");
+        let actual = page_snapshot("Attractor/Issue-to-Wiki-Migration", b"edited page bytes");
+        let mut receipt = apply_issue_wiki_mutation_dry_run(&dry_run, &expected, &actual).unwrap();
+        receipt.action = IssueWikiApplyAction::Create;
+        receipt.conflict_reason = None;
+        receipt.apply_key = issue_wiki_apply_key(&receipt);
+        let value = serde_json::to_value(receipt).unwrap();
+
+        let err = serde_json::from_value::<IssueWikiApplyReceipt>(value).unwrap_err();
+
+        assert!(err.to_string().contains("apply_action_mismatch"));
     }
 
     #[test]
