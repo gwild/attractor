@@ -204,6 +204,10 @@ pub enum IssueWikiWriteError {
     RefusedConflict { reason: String },
     /// The page path cannot be mapped safely under the caller-supplied wiki root.
     UnsafePagePath { page_path: String, reason: String },
+    /// The wiki root, an intermediate directory, or the target file is a
+    /// symlink. The materializer refuses these because otherwise a lexical
+    /// under-root path can write outside the caller-supplied tree.
+    SymlinkBoundary { path: PathBuf },
     /// The local page changed since the apply receipt's observed snapshot and
     /// does not already equal the deterministic target bytes.
     NonFastForward {
@@ -229,6 +233,9 @@ impl fmt::Display for IssueWikiWriteError {
                 f,
                 "issue_wiki unsafe_page_path page_path={page_path} reason={reason}"
             ),
+            Self::SymlinkBoundary { path } => {
+                write!(f, "issue_wiki symlink_boundary path={}", path.display())
+            }
             Self::NonFastForward {
                 page_path,
                 expected_hash,
@@ -291,6 +298,7 @@ pub fn materialize_issue_wiki_apply_receipt(
 
     let relative = relative_page_file_path(&receipt.actual_snapshot.page_path)?;
     let path = wiki_root.as_ref().join(&relative);
+    reject_symlink_boundary(wiki_root.as_ref(), &relative)?;
     let (pre_write_exists, before) = read_existing_or_empty(&path)?;
     let pre_write_snapshot =
         IssueWikiPageSnapshot::from_page_bytes(receipt.actual_snapshot.page_path.clone(), &before);
@@ -322,6 +330,7 @@ pub fn materialize_issue_wiki_apply_receipt(
                 source,
             })?;
         }
+        reject_symlink_boundary(wiki_root.as_ref(), &relative)?;
         fs::write(&path, target.as_bytes()).map_err(|source| IssueWikiWriteError::Io {
             path: path.clone(),
             source,
@@ -403,6 +412,43 @@ fn read_existing_or_empty(path: &Path) -> Result<(bool, Vec<u8>), IssueWikiWrite
     match fs::read(path) {
         Ok(bytes) => Ok((true, bytes)),
         Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok((false, Vec::new())),
+        Err(source) => Err(IssueWikiWriteError::Io {
+            path: path.to_path_buf(),
+            source,
+        }),
+    }
+}
+
+fn reject_symlink_boundary(root: &Path, relative: &Path) -> Result<(), IssueWikiWriteError> {
+    reject_symlink_if_exists(root)?;
+    let mut path = root.to_path_buf();
+    for component in relative.components() {
+        match component {
+            Component::Normal(segment) => {
+                path.push(segment);
+                reject_symlink_if_exists(&path)?;
+            }
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                return Err(IssueWikiWriteError::UnsafePagePath {
+                    page_path: relative.to_string_lossy().into_owned(),
+                    reason: "relative path escaped normalized components".to_owned(),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn reject_symlink_if_exists(path: &Path) -> Result<(), IssueWikiWriteError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            Err(IssueWikiWriteError::SymlinkBoundary {
+                path: path.to_path_buf(),
+            })
+        }
+        Ok(_) => Ok(()),
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(source) => Err(IssueWikiWriteError::Io {
             path: path.to_path_buf(),
             source,
@@ -519,6 +565,16 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.path);
         }
+    }
+
+    #[cfg(unix)]
+    fn symlink_dir(target: &Path, link: &Path) -> std::io::Result<()> {
+        std::os::unix::fs::symlink(target, link)
+    }
+
+    #[cfg(windows)]
+    fn symlink_dir(target: &Path, link: &Path) -> std::io::Result<()> {
+        std::os::windows::fs::symlink_dir(target, link)
     }
 
     fn hash_bytes(bytes: &[u8]) -> ContentHashHex {
@@ -813,5 +869,32 @@ mod tests {
         let err = materialize_issue_wiki_apply_receipt(dir.path(), &receipt).unwrap_err();
 
         assert!(matches!(err, IssueWikiWriteError::UnsafePagePath { .. }));
+    }
+
+    #[test]
+    fn symlinked_wiki_subdir_is_rejected_before_write() {
+        let root = TestDir::new();
+        let outside = TestDir::new();
+        let outside_page = outside.path().join("Issue-to-Wiki-Migration.md");
+        fs::write(&outside_page, "outside original").unwrap();
+        let link = root.path().join("Attractor");
+        if symlink_dir(outside.path(), &link).is_err() {
+            // Some Windows hosts require Developer Mode/admin for symlink
+            // creation. The materializer code path is still covered anywhere
+            // the platform lets this fixture build the boundary.
+            return;
+        }
+        let current = IssueWikiCurrentNote {
+            identity: "attractor.issue.43.issue-to-wiki-migration".to_owned(),
+            title: "Old title".to_owned(),
+            references: vec![],
+        };
+        let receipt = receipt_for(Some(current), b"outside original", b"outside original");
+
+        let err = materialize_issue_wiki_apply_receipt(root.path(), &receipt).unwrap_err();
+        let outside_after = fs::read_to_string(outside_page).unwrap();
+
+        assert!(matches!(err, IssueWikiWriteError::SymlinkBoundary { .. }));
+        assert_eq!(outside_after, "outside original");
     }
 }
