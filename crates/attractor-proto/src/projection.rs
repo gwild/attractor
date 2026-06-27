@@ -307,27 +307,60 @@ pub struct TypedReceipt {
 
 /// Result of comparing a body claim with a replay receipt.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ReceiptComparison {
     /// Receipt answers every load-bearing field and matches the claim.
     Equal,
     /// Receipt answers every load-bearing field but differs from the claim.
+    #[non_exhaustive]
     Mismatch {
         /// Fields that differed.
         mismatch_fields: Vec<FieldRef>,
     },
     /// Receipt is missing load-bearing fields and needs replay or migration.
+    #[non_exhaustive]
     Incomplete {
         /// Unknown fields that prevent adjudication.
         unknown_fields: Vec<FieldRef>,
     },
     /// Claim/receipt clocks require a concrete replay request.
+    #[non_exhaustive]
     NeedsReexec {
         /// Claim hash that requires replay.
         claim_hash: ClaimHash,
         /// Stored receipt hash that was insufficient.
         receipt_hash: ReceiptHash,
     },
+}
+
+impl ReceiptComparison {
+    /// Build an equal comparison result.
+    #[must_use]
+    pub const fn equal() -> Self {
+        Self::Equal
+    }
+
+    /// Build a mismatch comparison result over the fields that differed.
+    #[must_use]
+    pub fn mismatch(mismatch_fields: Vec<FieldRef>) -> Self {
+        Self::Mismatch { mismatch_fields }
+    }
+
+    /// Build an incomplete comparison result over unknown load-bearing fields.
+    #[must_use]
+    pub fn incomplete(unknown_fields: Vec<FieldRef>) -> Self {
+        Self::Incomplete { unknown_fields }
+    }
+
+    /// Build a replay-required comparison result for the claim/receipt clocks.
+    #[must_use]
+    pub fn needs_reexec(claim_hash: ClaimHash, receipt_hash: ReceiptHash) -> Self {
+        Self::NeedsReexec {
+            claim_hash,
+            receipt_hash,
+        }
+    }
 }
 
 /// State of the projection result.

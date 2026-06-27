@@ -1,0 +1,81 @@
+{
+  "schema_id": "attractor.receipt_comparison.corpus.v0",
+  "rows": [
+    {
+      "id": "known_9_vs_claimed_11_mismatch",
+      "claim_passed_count": {
+        "state": "known",
+        "value": 11
+      },
+      "receipt_passed_count": {
+        "state": "known",
+        "value": 9
+      },
+      "expect": {
+        "kind": "mismatch",
+        "mismatch_fields": [
+          {
+            "path": "passed_count"
+          }
+        ]
+      }
+    },
+    {
+      "id": "known_11_vs_known_11_equal",
+      "claim_passed_count": {
+        "state": "known",
+        "value": 11
+      },
+      "receipt_passed_count": {
+        "state": "known",
+        "value": 11
+      },
+      "expect": {
+        "kind": "equal"
+      }
+    },
+    {
+      "id": "unknown_receipt_side_refuses_clear_or_mismatch",
+      "claim_passed_count": {
+        "state": "known",
+        "value": 11
+      },
+      "receipt_passed_count": {
+        "state": "unknown",
+        "reason": "missing_passed_count",
+        "field_ref": {
+          "path": "passed_count"
+        }
+      },
+      "forbid": {
+        "allowed_kinds": [
+          "incomplete",
+          "needs_reexec"
+        ]
+      }
+    },
+    {
+      "id": "unknown_claim_and_receipt_refuse_equal",
+      "claim_passed_count": {
+        "state": "unknown",
+        "reason": "claim_value_unestablished",
+        "field_ref": {
+          "path": "passed_count"
+        }
+      },
+      "receipt_passed_count": {
+        "state": "unknown",
+        "reason": "receipt_value_unestablished",
+        "field_ref": {
+          "path": "passed_count"
+        }
+      },
+      "forbid": {
+        "allowed_kinds": [
+          "incomplete",
+          "needs_reexec"
+        ]
+      }
+    }
+  ]
+}

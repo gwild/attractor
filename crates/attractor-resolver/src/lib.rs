@@ -50,6 +50,8 @@
 //! Keeping both passes pure means the result is correct independent of when or
 //! whether the store is written.
 
+pub mod proof;
+
 use attractor_proto::{ContentHashHex, E2eReceipt};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
