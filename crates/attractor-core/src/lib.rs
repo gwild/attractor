@@ -42,7 +42,7 @@ pub use source_map::{ByteRange, LineRange, MarkdownSourceSpan, SyntaxKind, Typed
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::fmt;
+use std::fmt::{self, Write as _};
 
 /// A BLAKE3 content address: the 32-byte hash that *is* a value's identity.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -73,7 +73,7 @@ impl ContentHash {
         let mut s = String::with_capacity(64);
         for b in self.0 {
             // 1.92-safe: no format-args capture beyond what's stable here.
-            s.push_str(&format!("{b:02x}"));
+            let _ = write!(s, "{b:02x}");
         }
         s
     }

@@ -63,9 +63,10 @@ const TOOL_TOKENS: &[&str] = &[
 /// Placeholder left where untrusted material was removed (visible, auditable).
 const REDACTION: &str = "[redacted]";
 
-/// A value scrubbed (best-effort) of prompt-injection vectors. Constructible
-/// only via [`Sanitized::sanitize`]. **Not** a trust assertion — see the module
-/// docs: matrix content stays non-authoritative regardless.
+/// A value scrubbed (best-effort) of prompt-injection vectors.
+///
+/// Constructible only via [`Sanitized::sanitize`]. **Not** a trust assertion:
+/// matrix content stays non-authoritative regardless.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Sanitized<T>(T);
 

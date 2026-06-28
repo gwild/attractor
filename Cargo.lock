@@ -112,6 +112,7 @@ dependencies = [
 name = "attractor-wiki"
 version = "0.0.0"
 dependencies = [
+ "attractor-projector",
  "attractor-proto",
  "blake3",
  "serde",
