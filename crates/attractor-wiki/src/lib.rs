@@ -489,6 +489,16 @@ impl IssueWikiPublishReceipt {
         if !self.pushed && self.pre_tree_hash != self.post_tree_hash {
             return Err("issue_wiki publish_tree_changed_without_push".to_owned());
         }
+        let any_published = self
+            .entries
+            .iter()
+            .any(|entry| entry.action == IssueWikiPublishAction::Published);
+        if self.pushed != any_published {
+            return Err(format!(
+                "issue_wiki publish_pushed_action_mismatch pushed={} any_published={}",
+                self.pushed, any_published
+            ));
+        }
         Ok(())
     }
 }
@@ -823,6 +833,7 @@ pub trait IssueWikiPublishTransport {
         &mut self,
         wiki_root: &Path,
         manifest_key: &ContentHashHex,
+        relative_paths: &[PathBuf],
     ) -> Result<(), String>;
 }
 
@@ -848,8 +859,17 @@ impl IssueWikiPublishTransport for IssueWikiGitPushTransport {
         &mut self,
         wiki_root: &Path,
         manifest_key: &ContentHashHex,
+        relative_paths: &[PathBuf],
     ) -> Result<(), String> {
-        run_git(wiki_root, &["add", "-A"])?;
+        reject_staged_paths_outside_manifest(wiki_root, relative_paths)?;
+        let mut add_args = vec!["add".to_owned(), "--".to_owned()];
+        add_args.extend(
+            relative_paths
+                .iter()
+                .map(|path| path.to_string_lossy().replace('\\', "/")),
+        );
+        run_git_owned(wiki_root, &add_args)?;
+        reject_staged_paths_outside_manifest(wiki_root, relative_paths)?;
         let commit_message = format!(
             "Publish issue wiki manifest {}",
             &manifest_key.as_str()[..12]
@@ -858,6 +878,23 @@ impl IssueWikiPublishTransport for IssueWikiGitPushTransport {
         let destination = format!("HEAD:{}", self.branch);
         run_git(wiki_root, &["push", &self.remote, &destination])
     }
+}
+
+fn reject_staged_paths_outside_manifest(
+    wiki_root: &Path,
+    relative_paths: &[PathBuf],
+) -> Result<(), String> {
+    let allowed = relative_paths
+        .iter()
+        .map(|path| path.to_string_lossy().replace('\\', "/"))
+        .collect::<std::collections::BTreeSet<_>>();
+    let staged = run_git_stdout(wiki_root, &["diff", "--cached", "--name-only", "--"])?;
+    for path in staged.lines().filter(|line| !line.trim().is_empty()) {
+        if !allowed.contains(path) {
+            return Err(format!("git staged path outside manifest: {path}"));
+        }
+    }
+    Ok(())
 }
 
 fn run_git(wiki_root: &Path, args: &[&str]) -> Result<(), String> {
@@ -869,6 +906,48 @@ fn run_git(wiki_root: &Path, args: &[&str]) -> Result<(), String> {
         .map_err(|err| format!("git {} exec failed: {err}", args.join(" ")))?;
     if output.status.success() {
         return Ok(());
+    }
+    Err(format!(
+        "git {} rc={} stderr={}",
+        args.join(" "),
+        output
+            .status
+            .code()
+            .map_or_else(|| "signal".to_owned(), |code| code.to_string()),
+        String::from_utf8_lossy(&output.stderr).trim()
+    ))
+}
+
+fn run_git_owned(wiki_root: &Path, args: &[String]) -> Result<(), String> {
+    let display = args.join(" ");
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(wiki_root)
+        .args(args)
+        .output()
+        .map_err(|err| format!("git {display} exec failed: {err}"))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    Err(format!(
+        "git {display} rc={} stderr={}",
+        output
+            .status
+            .code()
+            .map_or_else(|| "signal".to_owned(), |code| code.to_string()),
+        String::from_utf8_lossy(&output.stderr).trim()
+    ))
+}
+
+fn run_git_stdout(wiki_root: &Path, args: &[&str]) -> Result<String, String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(wiki_root)
+        .args(args)
+        .output()
+        .map_err(|err| format!("git {} exec failed: {err}", args.join(" ")))?;
+    if output.status.success() {
+        return Ok(String::from_utf8_lossy(&output.stdout).into_owned());
     }
     Err(format!(
         "git {} rc={} stderr={}",
@@ -1177,8 +1256,12 @@ fn publish_issue_wiki_batch_manifest(
         .iter()
         .any(|entry| entry.action == IssueWikiPublishAction::Published);
     let pushed = if changed {
+        let push_paths = entries
+            .iter()
+            .map(|entry| relative_page_file_path(&entry.page_path))
+            .collect::<Result<Vec<_>, _>>()?;
         transport
-            .push_manifest(wiki_root, &manifest.manifest_key)
+            .push_manifest(wiki_root, &manifest.manifest_key, &push_paths)
             .map_err(|reason| IssueWikiPublishError::Push { reason })?;
         true
     } else {
@@ -2011,6 +2094,7 @@ reference: wiki:Attractor/Batch-Migration-Manifest\n"
     struct RecordingPush {
         calls: usize,
         manifest_keys: Vec<ContentHashHex>,
+        relative_paths: Vec<Vec<String>>,
     }
 
     impl IssueWikiPublishTransport for RecordingPush {
@@ -2018,9 +2102,16 @@ reference: wiki:Attractor/Batch-Migration-Manifest\n"
             &mut self,
             _wiki_root: &Path,
             manifest_key: &ContentHashHex,
+            relative_paths: &[PathBuf],
         ) -> Result<(), String> {
             self.calls += 1;
             self.manifest_keys.push(manifest_key.clone());
+            self.relative_paths.push(
+                relative_paths
+                    .iter()
+                    .map(|path| path.to_string_lossy().replace('\\', "/"))
+                    .collect(),
+            );
             Ok(())
         }
     }
@@ -2490,6 +2581,10 @@ reference: wiki:Attractor/Batch-Migration-Manifest\n"
         assert!(first.pushed);
         assert_eq!(push.calls, 1);
         assert_eq!(push.manifest_keys, vec![manifest.manifest_key.clone()]);
+        assert_eq!(
+            push.relative_paths,
+            vec![vec!["Attractor/Batch-Migration-Manifest.md".to_owned()]]
+        );
         assert_eq!(first.entries[0].action, IssueWikiPublishAction::Published);
         assert!(!second.pushed);
         assert_eq!(push.calls, 1, "replay must use the same push spy handle");
@@ -2669,6 +2764,35 @@ reference: wiki:Attractor/Batch-Migration-Manifest\n"
     }
 
     #[test]
+    fn git_transport_rejects_staged_path_outside_manifest() {
+        let dir = TestDir::new();
+        run_git(dir.path(), &["init"]).unwrap();
+        run_git(
+            dir.path(),
+            &["config", "user.email", "test@example.invalid"],
+        )
+        .unwrap();
+        run_git(dir.path(), &["config", "user.name", "Attractor Test"]).unwrap();
+        fs::write(dir.path().join("Unrelated.md"), "not in manifest").unwrap();
+        run_git(dir.path(), &["add", "Unrelated.md"]).unwrap();
+        let manifest_key = hash_bytes(b"manifest key");
+        let mut transport = IssueWikiGitPushTransport::new("origin", "master");
+
+        let err = transport
+            .push_manifest(
+                dir.path(),
+                &manifest_key,
+                &[PathBuf::from("Attractor/Batch-Migration-Manifest.md")],
+            )
+            .unwrap_err();
+
+        assert!(err.contains("staged path outside manifest: Unrelated.md"));
+        let staged = run_git_stdout(dir.path(), &["diff", "--cached", "--name-only", "--"])
+            .expect("staged names");
+        assert_eq!(staged.trim(), "Unrelated.md");
+    }
+
+    #[test]
     fn publish_receipt_rejects_recomputed_key_tamper() {
         let manifest = batch_manifest_fixture();
         let manifest_json = serde_json::to_vec(&manifest).unwrap();
@@ -2691,5 +2815,29 @@ reference: wiki:Attractor/Batch-Migration-Manifest\n"
         assert!(err
             .to_string()
             .contains("publish_entry_noop_pre_post_differ"));
+    }
+
+    #[test]
+    fn publish_receipt_rejects_pushed_flag_tamper_even_with_recomputed_key() {
+        let manifest = batch_manifest_fixture();
+        let manifest_json = serde_json::to_vec(&manifest).unwrap();
+        let live = TestDir::new();
+        let mut push = RecordingPush::default();
+        let mut receipt = publish_issue_wiki_batch_manifest_json(
+            live.path(),
+            &manifest_json,
+            &manifest.manifest_key,
+            true,
+            &mut push,
+        )
+        .unwrap();
+        receipt.pushed = false;
+        receipt.pre_tree_hash = receipt.post_tree_hash.clone();
+        receipt.publish_key = issue_wiki_publish_key(&receipt);
+        let value = serde_json::to_value(receipt).unwrap();
+
+        let err = serde_json::from_value::<IssueWikiPublishReceipt>(value).unwrap_err();
+
+        assert!(err.to_string().contains("publish_pushed_action_mismatch"));
     }
 }
