@@ -1279,6 +1279,8 @@ pub enum IssueWikiBatchRunError {
     },
     /// The caller-supplied expected selector did not match the export selector.
     SelectorMismatch { expected: String, actual: String },
+    /// Staging and live roots resolve to the same wiki tree.
+    SameWikiRoot { path: PathBuf },
     /// The generated manifest contains rows that should be handled by an
     /// operator before live publish.
     NonPublishableManifest {
@@ -1308,6 +1310,9 @@ impl fmt::Display for IssueWikiBatchRunError {
                 f,
                 "issue_wiki batch_run_selector_mismatch expected={expected} actual={actual}"
             ),
+            Self::SameWikiRoot { path } => {
+                write!(f, "issue_wiki batch_run_same_wiki_root path={}", path.display())
+            }
             Self::NonPublishableManifest {
                 manifest_key,
                 source_ref,
@@ -1331,6 +1336,24 @@ impl fmt::Display for IssueWikiBatchRunError {
 }
 
 impl std::error::Error for IssueWikiBatchRunError {}
+
+fn reject_same_wiki_root(staging: &Path, live: &Path) -> Result<(), IssueWikiBatchRunError> {
+    let staging = canonicalize_batch_root(staging)?;
+    let live = canonicalize_batch_root(live)?;
+    if staging == live {
+        return Err(IssueWikiBatchRunError::SameWikiRoot { path: live });
+    }
+    Ok(())
+}
+
+fn canonicalize_batch_root(path: &Path) -> Result<PathBuf, IssueWikiBatchRunError> {
+    path.canonicalize().map_err(|source| {
+        IssueWikiBatchRunError::Manifest(IssueWikiWriteError::Io {
+            path: path.to_path_buf(),
+            source,
+        })
+    })
+}
 
 /// Compute the exact export hash a #54 driver call must explicitly name.
 #[must_use]
@@ -1360,6 +1383,9 @@ pub fn run_issue_wiki_batch_driver(
     explicit_publish_opt_in: bool,
     transport: &mut impl IssueWikiPublishTransport,
 ) -> Result<IssueWikiBatchRunReceipt, IssueWikiBatchRunError> {
+    let staging_wiki_root = staging_wiki_root.as_ref();
+    let live_wiki_root = live_wiki_root.as_ref();
+    reject_same_wiki_root(staging_wiki_root, live_wiki_root)?;
     let actual_export_hash = issue_wiki_batch_export_hash(export);
     if &actual_export_hash != expected_issue_export_hash {
         return Err(IssueWikiBatchRunError::ExportHashMismatch {
@@ -3235,6 +3261,9 @@ reference: wiki:Attractor/Batch-Migration-Manifest\n"
         assert!(receipt.publish_receipt.pushed);
         assert_eq!(push.calls, 1);
         assert_eq!(push.manifest_keys, vec![receipt.manifest_key.clone()]);
+        let value = serde_json::to_value(&receipt).unwrap();
+        let decoded = serde_json::from_value::<IssueWikiBatchRunReceipt>(value).unwrap();
+        assert_eq!(decoded.run_key, receipt.run_key);
         assert!(!serde_json::to_string(&receipt)
             .unwrap()
             .contains("identity: attractor.issue.52.batch-manifest"));
@@ -3358,6 +3387,37 @@ reference: wiki:Attractor/Batch-Migration-Manifest\n"
                 assert!(reason.unwrap().contains("source_hash_stale"));
             }
             other => panic!("expected non-publishable manifest, got {other:?}"),
+        }
+        assert_eq!(push.calls, 0);
+        assert!(!live
+            .path()
+            .join("Attractor/Batch-Migration-Manifest.md")
+            .exists());
+    }
+
+    #[test]
+    fn batch_driver_refuses_same_wiki_root_before_materialization() {
+        let live = TestDir::new();
+        let export = issue_export("repo=gwild/attractor issue=52", 52, issue_source_bytes());
+        let export_hash = issue_wiki_batch_export_hash(&export);
+        let mut push = RecordingPush::default();
+
+        let err = run_issue_wiki_batch_driver(
+            live.path(),
+            live.path(),
+            &export,
+            &export_hash,
+            "repo=gwild/attractor issue=52",
+            false,
+            &mut push,
+        )
+        .unwrap_err();
+
+        match err {
+            IssueWikiBatchRunError::SameWikiRoot { path } => {
+                assert_eq!(path, live.path().canonicalize().unwrap());
+            }
+            other => panic!("expected SameWikiRoot, got {other:?}"),
         }
         assert_eq!(push.calls, 0);
         assert!(!live
