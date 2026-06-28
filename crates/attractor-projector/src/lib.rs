@@ -20,7 +20,7 @@ use attractor_proto::{
     IssueWikiConformanceReceipt, IssueWikiMalformed, IssueWikiNoteEvidence,
     IssueWikiProjectionEnvelope, IssueWikiProjectionResult, IssueWikiProjectionState,
     IssueWikiReference, IssueWikiSource, IssueWikiStale, ProvenanceRef, ScoreContribution,
-    SourceSpan, SpanBoundText, ISSUE_WIKI_SCHEMA_ID_V0,
+    SourceSpan, SpanBoundText, ISSUE_WIKI_FULL_TEXT_SCHEMA_ID_V0, ISSUE_WIKI_SCHEMA_ID_V0,
 };
 use attractor_store::{Node, Store, StoreError};
 use std::fmt;
@@ -46,6 +46,8 @@ pub const MARKDOWN_REFERENCES_PROJECTOR: &str = "attractor.projector.markdown.re
 pub const EDGE_DERIVED_FROM: &str = "derived_from";
 /// Stable transform identifier for the issue-to-wiki extractor.
 pub const ISSUE_WIKI_PROJECTOR: &str = "attractor.projector.issue_wiki.v0";
+/// Stable transform identifier for the Phase 2 full-text issue-to-wiki extractor.
+pub const ISSUE_WIKI_FULL_TEXT_PROJECTOR: &str = "attractor.projector.issue_wiki.full_text.v0";
 
 /// Source metadata for a markdown document entering the projector.
 ///
@@ -73,6 +75,7 @@ struct IssueWikiField {
 struct IssueWikiParsed {
     identity: IssueWikiField,
     title: IssueWikiField,
+    full_text: Option<IssueWikiField>,
     references: Vec<IssueWikiField>,
 }
 
@@ -331,10 +334,45 @@ pub fn project_issue_wiki(
     source: IssueWikiSource,
     source_bytes: &[u8],
 ) -> IssueWikiProjectionResult {
+    project_issue_wiki_with_contract(
+        source,
+        source_bytes,
+        ISSUE_WIKI_SCHEMA_ID_V0,
+        ISSUE_WIKI_PROJECTOR,
+        false,
+    )
+}
+
+/// Extract full-text issue-to-wiki evidence from source bytes.
+///
+/// This Phase 2 projector uses a distinct schema/projector identity and carries
+/// an optional full-text evidence payload in the projection row. Downstream
+/// manifest, apply, write, publish, lease, and receipt types are unchanged.
+#[must_use]
+pub fn project_issue_wiki_full_text(
+    source: IssueWikiSource,
+    source_bytes: &[u8],
+) -> IssueWikiProjectionResult {
+    project_issue_wiki_with_contract(
+        source,
+        source_bytes,
+        ISSUE_WIKI_FULL_TEXT_SCHEMA_ID_V0,
+        ISSUE_WIKI_FULL_TEXT_PROJECTOR,
+        true,
+    )
+}
+
+fn project_issue_wiki_with_contract(
+    source: IssueWikiSource,
+    source_bytes: &[u8],
+    schema_id: &str,
+    projector_id: &str,
+    require_full_text: bool,
+) -> IssueWikiProjectionResult {
     let actual_source_hash = hash_hex(&ContentHash::of(source_bytes));
     if actual_source_hash != source.source_hash {
         return IssueWikiProjectionResult::Stale(Box::new(IssueWikiStale {
-            schema_id: ISSUE_WIKI_SCHEMA_ID_V0.to_owned(),
+            schema_id: schema_id.to_owned(),
             source_ref: source.source_ref.clone(),
             expected_source_hash: source.source_hash.clone(),
             actual_source_hash: actual_source_hash.clone(),
@@ -342,33 +380,53 @@ pub fn project_issue_wiki(
                 IssueWikiProjectionState::Stale,
                 &source.source_ref,
                 actual_source_hash,
+                projector_id,
                 Vec::new(),
             ),
         }));
     }
 
-    let note = match parse_issue_wiki_note(&source, source_bytes) {
+    let note = match parse_issue_wiki_note(&source, source_bytes, require_full_text) {
         Ok(note) => note,
         Err(err) => {
-            return issue_wiki_malformed(
+            return issue_wiki_malformed_with_contract(
                 &source,
+                schema_id,
+                projector_id,
                 err.to_string(),
                 vec![issue_wiki_error_field_ref(&err)],
             );
         }
     };
-    project_issue_wiki_candidate(source, source_bytes, note)
+    project_issue_wiki_candidate_with_contract(source, source_bytes, note, schema_id, projector_id)
 }
 
+#[cfg(test)]
 fn project_issue_wiki_candidate(
     source: IssueWikiSource,
     source_bytes: &[u8],
     note: IssueWikiNoteEvidence,
 ) -> IssueWikiProjectionResult {
+    project_issue_wiki_candidate_with_contract(
+        source,
+        source_bytes,
+        note,
+        ISSUE_WIKI_SCHEMA_ID_V0,
+        ISSUE_WIKI_PROJECTOR,
+    )
+}
+
+fn project_issue_wiki_candidate_with_contract(
+    source: IssueWikiSource,
+    source_bytes: &[u8],
+    note: IssueWikiNoteEvidence,
+    schema_id: &str,
+    projector_id: &str,
+) -> IssueWikiProjectionResult {
     let actual_source_hash = hash_hex(&ContentHash::of(source_bytes));
     if actual_source_hash != source.source_hash {
         return IssueWikiProjectionResult::Stale(Box::new(IssueWikiStale {
-            schema_id: ISSUE_WIKI_SCHEMA_ID_V0.to_owned(),
+            schema_id: schema_id.to_owned(),
             source_ref: source.source_ref.clone(),
             expected_source_hash: source.source_hash.clone(),
             actual_source_hash: actual_source_hash.clone(),
@@ -376,6 +434,7 @@ fn project_issue_wiki_candidate(
                 IssueWikiProjectionState::Stale,
                 &source.source_ref,
                 actual_source_hash,
+                projector_id,
                 Vec::new(),
             ),
         }));
@@ -383,7 +442,15 @@ fn project_issue_wiki_candidate(
 
     let receipts = match validate_issue_wiki_conformance(&source, source_bytes, &note) {
         Ok(receipts) => receipts,
-        Err((reason, field_refs)) => return issue_wiki_malformed(&source, reason, field_refs),
+        Err((reason, field_refs)) => {
+            return issue_wiki_malformed_with_contract(
+                &source,
+                schema_id,
+                projector_id,
+                reason,
+                field_refs,
+            );
+        }
     };
     let field_refs = receipts
         .iter()
@@ -393,7 +460,7 @@ fn project_issue_wiki_candidate(
         .collect();
 
     IssueWikiProjectionResult::Accepted(Box::new(IssueWikiAccepted {
-        schema_id: ISSUE_WIKI_SCHEMA_ID_V0.to_owned(),
+        schema_id: schema_id.to_owned(),
         source: source.clone(),
         note,
         conformance_receipts: receipts,
@@ -401,6 +468,7 @@ fn project_issue_wiki_candidate(
             IssueWikiProjectionState::Accepted,
             &source.source_ref,
             source.source_hash,
+            projector_id,
             field_refs,
         ),
     }))
@@ -664,6 +732,7 @@ fn issue_wiki_envelope(
     state: IssueWikiProjectionState,
     source_ref: &str,
     source_hash: ContentHashHex,
+    projector_id: &str,
     field_refs: Vec<FieldRef>,
 ) -> IssueWikiProjectionEnvelope {
     IssueWikiProjectionEnvelope {
@@ -684,18 +753,20 @@ fn issue_wiki_envelope(
         },
         source_ref: source_ref.to_owned(),
         source_hash,
-        transform_id: ISSUE_WIKI_PROJECTOR.to_owned(),
+        transform_id: projector_id.to_owned(),
         field_refs,
     }
 }
 
-fn issue_wiki_malformed(
+fn issue_wiki_malformed_with_contract(
     source: &IssueWikiSource,
+    schema_id: &str,
+    projector_id: &str,
     reason: String,
     field_refs: Vec<FieldRef>,
 ) -> IssueWikiProjectionResult {
     IssueWikiProjectionResult::Malformed(Box::new(IssueWikiMalformed {
-        schema_id: Some(ISSUE_WIKI_SCHEMA_ID_V0.to_owned()),
+        schema_id: Some(schema_id.to_owned()),
         source_ref: source.source_ref.clone(),
         reason,
         field_refs: field_refs.clone(),
@@ -703,6 +774,7 @@ fn issue_wiki_malformed(
             IssueWikiProjectionState::Malformed,
             &source.source_ref,
             source.source_hash.clone(),
+            projector_id,
             field_refs,
         ),
     }))
@@ -723,8 +795,24 @@ fn issue_wiki_error_field_ref(err: &ProjectorError) -> FieldRef {
 fn parse_issue_wiki_note(
     source: &IssueWikiSource,
     source_bytes: &[u8],
+    require_full_text: bool,
 ) -> Result<IssueWikiNoteEvidence, ProjectorError> {
     let parsed = parse_issue_wiki_source(source_bytes)?;
+    let full_text = match (require_full_text, parsed.full_text) {
+        (true, Some(full_text)) => Some(span_bound_text(
+            full_text.value,
+            &source.source_hash,
+            full_text.start,
+            full_text.end,
+            "full_text",
+        )),
+        (true, None) => {
+            return Err(ProjectorError::MissingIssueWikiField {
+                field_path: "full_text".to_owned(),
+            });
+        }
+        (false, _) => None,
+    };
     Ok(IssueWikiNoteEvidence {
         identity: span_bound_text(
             parsed.identity.value,
@@ -740,6 +828,7 @@ fn parse_issue_wiki_note(
             parsed.title.end,
             "title",
         ),
+        full_text,
         references: parsed
             .references
             .into_iter()
@@ -784,6 +873,7 @@ fn parse_issue_wiki_source(source_bytes: &[u8]) -> Result<IssueWikiParsed, Proje
     let text = std::str::from_utf8(source_bytes).map_err(ProjectorError::InvalidUtf8)?;
     let mut identity = None;
     let mut title = None;
+    let mut full_text = None;
     let mut references = Vec::new();
     let mut offset = 0usize;
 
@@ -794,6 +884,9 @@ fn parse_issue_wiki_source(source_bytes: &[u8]) -> Result<IssueWikiParsed, Proje
         }
         if title.is_none() {
             title = issue_wiki_line_field(line_without_newline, offset, "title:");
+        }
+        if full_text.is_none() {
+            full_text = issue_wiki_line_field(line_without_newline, offset, "body:");
         }
         if let Some(reference) = issue_wiki_line_field(line_without_newline, offset, "reference:") {
             references.push(reference);
@@ -808,6 +901,7 @@ fn parse_issue_wiki_source(source_bytes: &[u8]) -> Result<IssueWikiParsed, Proje
         title: title.ok_or_else(|| ProjectorError::MissingIssueWikiField {
             field_path: "title".to_owned(),
         })?,
+        full_text,
         references,
     })
 }
@@ -835,7 +929,7 @@ fn validate_issue_wiki_conformance(
 ) -> Result<Vec<IssueWikiConformanceReceipt>, (String, Vec<FieldRef>)> {
     let expected = parse_issue_wiki_source(source_bytes)
         .map_err(|err| (err.to_string(), vec![issue_wiki_error_field_ref(&err)]))?;
-    let mut receipts = Vec::with_capacity(2 + note.references.len());
+    let mut receipts = Vec::with_capacity(3 + note.references.len());
 
     validate_span_bound_text(
         "identity",
@@ -853,6 +947,27 @@ fn validate_issue_wiki_conformance(
         source_bytes,
         &mut receipts,
     )?;
+    if let Some(full_text) = &note.full_text {
+        let Some(expected_full_text) = &expected.full_text else {
+            return Err((
+                ProjectorError::MissingIssueWikiField {
+                    field_path: "full_text".to_owned(),
+                }
+                .to_string(),
+                vec![FieldRef {
+                    path: "full_text".to_owned(),
+                }],
+            ));
+        };
+        validate_span_bound_text(
+            "full_text",
+            expected_full_text,
+            full_text,
+            &source.source_hash,
+            source_bytes,
+            &mut receipts,
+        )?;
+    }
     for (idx, reference) in note.references.iter().enumerate() {
         let field_path = format!("references[{idx}].target");
         let Some(expected_ref) = expected.references.get(idx) else {
@@ -1169,16 +1284,18 @@ fn hash_hex(hash: &ContentHash) -> ContentHashHex {
 mod tests {
     use super::{
         parse_issue_wiki_note, project_issue_wiki, project_issue_wiki_candidate,
-        project_markdown_frontmatter_id, project_markdown_frontmatter_id_into_store,
-        project_markdown_references, project_markdown_references_into_store,
-        project_markdown_title, project_markdown_title_into_store, MarkdownSource, ProjectorError,
-        EDGE_DERIVED_FROM, ISSUE_WIKI_PROJECTOR, MARKDOWN_FRONTMATTER_ID_PROJECTOR,
+        project_issue_wiki_full_text, project_markdown_frontmatter_id,
+        project_markdown_frontmatter_id_into_store, project_markdown_references,
+        project_markdown_references_into_store, project_markdown_title,
+        project_markdown_title_into_store, MarkdownSource, ProjectorError, EDGE_DERIVED_FROM,
+        ISSUE_WIKI_FULL_TEXT_PROJECTOR, ISSUE_WIKI_PROJECTOR, MARKDOWN_FRONTMATTER_ID_PROJECTOR,
         MARKDOWN_REFERENCES_PROJECTOR, MARKDOWN_TITLE_PROJECTOR,
     };
     use attractor_core::ContentHash;
     use attractor_proto::{
         ApiRequest, ApiResponse, ContentHashHex, GetData, IssueWikiNoteEvidence,
         IssueWikiProjectionResult, IssueWikiProjectionState, IssueWikiSource, RequestKind,
+        ISSUE_WIKI_FULL_TEXT_SCHEMA_ID_V0, ISSUE_WIKI_SCHEMA_ID_V0,
     };
     use attractor_store::Store;
 
@@ -1295,6 +1412,48 @@ mod tests {
     }
 
     #[test]
+    fn issue_wiki_full_text_projector_has_distinct_payload_and_identity() {
+        let source_bytes = b"identity: attractor.issue.3057.phase-two\n\
+title: Phase 2 full text migration\n\
+body: Full issue body text that must not collapse to the summary title.\n\
+reference: wiki:Attractor/Phase-2-Full-Text\n";
+        let source = issue_source(source_bytes);
+
+        let summary = project_issue_wiki(source.clone(), source_bytes);
+        let full_text = project_issue_wiki_full_text(source, source_bytes);
+        let (summary, full_text) = match (summary, full_text) {
+            (
+                IssueWikiProjectionResult::Accepted(summary),
+                IssueWikiProjectionResult::Accepted(full_text),
+            ) => (summary, full_text),
+            other => panic!("expected accepted summary/full-text projections, got {other:?}"),
+        };
+
+        assert_eq!(summary.schema_id, ISSUE_WIKI_SCHEMA_ID_V0);
+        assert_eq!(summary.envelope.transform_id, ISSUE_WIKI_PROJECTOR);
+        assert!(summary.note.full_text.is_none());
+        assert_eq!(full_text.schema_id, ISSUE_WIKI_FULL_TEXT_SCHEMA_ID_V0);
+        assert_eq!(
+            full_text.envelope.transform_id,
+            ISSUE_WIKI_FULL_TEXT_PROJECTOR
+        );
+        let body = full_text
+            .note
+            .full_text
+            .as_ref()
+            .expect("full-text projector must carry body evidence");
+        assert!(body.value.contains("Full issue body text"));
+        assert_ne!(
+            serde_json::to_vec(&summary.note).unwrap(),
+            serde_json::to_vec(&full_text.note).unwrap()
+        );
+        assert!(full_text
+            .conformance_receipts
+            .iter()
+            .any(|receipt| receipt.field_path == "full_text"));
+    }
+
+    #[test]
     fn issue_wiki_negative_conformance_fixtures_are_malformed_before_acceptance() {
         let source_bytes = issue_fixture();
         let source = issue_source(source_bytes);
@@ -1307,7 +1466,7 @@ mod tests {
             let id = case["id"].as_str().unwrap();
             let mutation = case["mutation"].as_str().unwrap();
             let reason = case["reason"].as_str().unwrap();
-            let mut note = parse_issue_wiki_note(&source, source_bytes).unwrap();
+            let mut note = parse_issue_wiki_note(&source, source_bytes, false).unwrap();
             apply_issue_wiki_negative_mutation(&mut note, mutation);
 
             assert_eq!(

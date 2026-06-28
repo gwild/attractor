@@ -13,6 +13,9 @@ use std::fmt;
 /// Stable schema id for issue-to-wiki migration projections.
 pub const ISSUE_WIKI_SCHEMA_ID_V0: &str = "attractor.issue_wiki.projection.v0";
 
+/// Stable schema id for full-text issue-to-wiki migration projections.
+pub const ISSUE_WIKI_FULL_TEXT_SCHEMA_ID_V0: &str = "attractor.issue_wiki.full_text_projection.v0";
+
 /// Stable schema id for issue-to-wiki dry-run mutation plans.
 pub const ISSUE_WIKI_MUTATION_PLAN_SCHEMA_ID_V0: &str = "attractor.issue_wiki.mutation_plan.v0";
 
@@ -73,6 +76,9 @@ pub struct IssueWikiNoteEvidence {
     pub identity: SpanBoundText,
     /// Wiki note title.
     pub title: SpanBoundText,
+    /// Optional full issue body text for Phase 2 projection-only verification.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub full_text: Option<SpanBoundText>,
     /// Typed references extracted from the issue.
     pub references: Vec<IssueWikiReference>,
 }
@@ -471,6 +477,7 @@ impl<'de> Deserialize<'de> for IssueWikiApplyReceipt {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct IssueWikiApplyReceiptWire {
     schema_id: String,
     action: IssueWikiApplyAction,
@@ -519,6 +526,7 @@ impl<'de> Deserialize<'de> for IssueWikiMutationDryRunReceipt {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct IssueWikiMutationDryRunReceiptWire {
     schema_id: String,
     action: IssueWikiMutationAction,
@@ -709,6 +717,9 @@ impl IssueWikiAccepted {
                 )?;
             }
         }
+        if let Some(full_text) = &self.note.full_text {
+            self.expect_offline_receipt("full_text", &full_text.value, &full_text.span)?;
+        }
         Ok(())
     }
 
@@ -778,6 +789,9 @@ impl IssueWikiAccepted {
             self.note.identity.span.clone(),
             self.note.title.span.clone(),
         ];
+        if let Some(full_text) = &self.note.full_text {
+            source_spans.push(full_text.span.clone());
+        }
         source_spans.extend(
             self.note
                 .references
@@ -899,6 +913,9 @@ impl IssueWikiAccepted {
                 expected: self.source.source_hash.clone(),
                 actual: self.envelope.source_hash.clone(),
             });
+        }
+        if let Some(full_text) = &self.note.full_text {
+            self.expect_span_hash("full_text", &full_text.span)?;
         }
         for (idx, reference) in self.note.references.iter().enumerate() {
             self.expect_span_hash(&format!("references[{idx}]"), &reference.span)?;
@@ -1302,6 +1319,7 @@ mod tests {
                     value: "Track issue-to-wiki migration contract".to_owned(),
                     span: span(source_hash.clone(), 33, 76, "issue.title"),
                 },
+                full_text: None,
                 references: vec![IssueWikiReference {
                     target: "wiki:Attractor/Issue-to-Wiki-Migration".to_owned(),
                     label: Some(SpanBoundText {
