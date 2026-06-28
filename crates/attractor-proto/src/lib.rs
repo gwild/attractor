@@ -34,7 +34,8 @@ pub use issue_wiki::{
     IssueWikiPageSnapshot, IssueWikiProjectionEnvelope, IssueWikiProjectionError,
     IssueWikiProjectionResult, IssueWikiProjectionState, IssueWikiReference, IssueWikiSource,
     IssueWikiStale, IssueWikiStoreMutation, SpanBoundText, ISSUE_WIKI_APPLY_RECEIPT_SCHEMA_ID_V0,
-    ISSUE_WIKI_MUTATION_PLAN_SCHEMA_ID_V0, ISSUE_WIKI_SCHEMA_ID_V0,
+    ISSUE_WIKI_FULL_TEXT_SCHEMA_ID_V0, ISSUE_WIKI_MUTATION_PLAN_SCHEMA_ID_V0,
+    ISSUE_WIKI_SCHEMA_ID_V0,
 };
 
 pub use projection::{

@@ -6,13 +6,16 @@
 //! layer consumes only a frozen [`IssueWikiBatchManifest`] plus its explicit
 //! manifest hash, then delegates live IO to an opt-in transport.
 
-use attractor_projector::{project_issue_wiki, ISSUE_WIKI_PROJECTOR};
+use attractor_projector::{
+    project_issue_wiki, project_issue_wiki_full_text, ISSUE_WIKI_FULL_TEXT_PROJECTOR,
+    ISSUE_WIKI_PROJECTOR,
+};
 use attractor_proto::{
     apply_issue_wiki_mutation_dry_run, issue_wiki_page_snapshot_hash, plan_issue_wiki_mutation,
     ContentHashHex, IssueWikiApplyAction, IssueWikiApplyReceipt, IssueWikiCurrentNote,
     IssueWikiPageSnapshot, IssueWikiProjectionResult, IssueWikiSource,
-    ISSUE_WIKI_APPLY_RECEIPT_SCHEMA_ID_V0, ISSUE_WIKI_MUTATION_PLAN_SCHEMA_ID_V0,
-    ISSUE_WIKI_SCHEMA_ID_V0,
+    ISSUE_WIKI_APPLY_RECEIPT_SCHEMA_ID_V0, ISSUE_WIKI_FULL_TEXT_SCHEMA_ID_V0,
+    ISSUE_WIKI_MUTATION_PLAN_SCHEMA_ID_V0, ISSUE_WIKI_SCHEMA_ID_V0,
 };
 use serde::{Deserialize, Deserializer, Serialize};
 use std::fmt;
@@ -34,6 +37,27 @@ pub const ISSUE_WIKI_BATCH_CLAIM_LEDGER_SCHEMA_ID_V0: &str =
     "attractor.issue_wiki.batch_claim_ledger.v0";
 /// Stable schema id for serialized issue-wiki publish leases.
 pub const ISSUE_WIKI_PUBLISH_LEASE_SCHEMA_ID_V0: &str = "attractor.issue_wiki.publish_lease.v0";
+
+#[derive(Clone, Copy, Debug)]
+struct IssueWikiProjectionContract {
+    projection_schema_id: &'static str,
+    projector_id: &'static str,
+    project: fn(IssueWikiSource, &[u8]) -> IssueWikiProjectionResult,
+}
+
+const ISSUE_WIKI_SUMMARY_PROJECTION_CONTRACT: IssueWikiProjectionContract =
+    IssueWikiProjectionContract {
+        projection_schema_id: ISSUE_WIKI_SCHEMA_ID_V0,
+        projector_id: ISSUE_WIKI_PROJECTOR,
+        project: project_issue_wiki,
+    };
+
+const ISSUE_WIKI_FULL_TEXT_PROJECTION_CONTRACT: IssueWikiProjectionContract =
+    IssueWikiProjectionContract {
+        projection_schema_id: ISSUE_WIKI_FULL_TEXT_SCHEMA_ID_V0,
+        projector_id: ISSUE_WIKI_FULL_TEXT_PROJECTOR,
+        project: project_issue_wiki_full_text,
+    };
 
 /// Materialized local write action.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -479,6 +503,7 @@ impl<'de> Deserialize<'de> for IssueWikiPublishLease {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct IssueWikiBatchManifestWire {
     schema_id: String,
     issue_export_hash: ContentHashHex,
@@ -564,6 +589,7 @@ impl<'de> Deserialize<'de> for IssueWikiWriteReceipt {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct IssueWikiWriteReceiptWire {
     schema_id: String,
     action: IssueWikiWriteAction,
@@ -604,6 +630,7 @@ impl<'de> Deserialize<'de> for IssueWikiPublishReceipt {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct IssueWikiPublishReceiptWire {
     schema_id: String,
     manifest_key: ContentHashHex,
@@ -1086,7 +1113,11 @@ impl IssueWikiBatchManifest {
                 ISSUE_WIKI_BATCH_MANIFEST_SCHEMA_ID_V0, self.schema_id
             ));
         }
-        let expected_digest = issue_wiki_projection_schema_digest();
+        let expected_digest =
+            issue_wiki_projection_schema_digest_for(&issue_wiki_projection_contract_for_manifest(
+                &self.projection_schema_id,
+                &self.projector_id,
+            )?);
         if self.projection_schema_digest != expected_digest {
             return Err(format!(
                 "issue_wiki batch_manifest_projection_schema_digest_mismatch expected={} actual={}",
@@ -1117,18 +1148,10 @@ impl IssueWikiBatchManifest {
     }
 
     fn validate_structural_invariants(&self) -> Result<(), String> {
-        if self.projection_schema_id != ISSUE_WIKI_SCHEMA_ID_V0 {
-            return Err(format!(
-                "issue_wiki batch_manifest_projection_schema_mismatch expected={} actual={}",
-                ISSUE_WIKI_SCHEMA_ID_V0, self.projection_schema_id
-            ));
-        }
-        if self.projector_id != ISSUE_WIKI_PROJECTOR {
-            return Err(format!(
-                "issue_wiki batch_manifest_projector_mismatch expected={} actual={}",
-                ISSUE_WIKI_PROJECTOR, self.projector_id
-            ));
-        }
+        issue_wiki_projection_contract_for_manifest(
+            &self.projection_schema_id,
+            &self.projector_id,
+        )?;
         for entry in &self.entries {
             entry.validate_structural_invariants()?;
         }
@@ -2355,12 +2378,44 @@ pub fn materialize_issue_wiki_batch_manifest(
     wiki_root: impl AsRef<Path>,
     export: &IssueWikiBatchExport,
 ) -> Result<IssueWikiBatchManifest, IssueWikiWriteError> {
+    materialize_issue_wiki_batch_manifest_with_contract(
+        wiki_root,
+        export,
+        &ISSUE_WIKI_SUMMARY_PROJECTION_CONTRACT,
+    )
+}
+
+/// Run a no-network full-text issue-to-wiki batch into a local wiki tree.
+///
+/// This is the Phase 2 projector-only entry point: it swaps only the projection
+/// contract while reusing the same manifest/apply/write receipt types. It does
+/// not publish to a live wiki checkout.
+///
+/// # Errors
+/// Returns [`IssueWikiWriteError`] when projection/apply/write construction
+/// fails or the local staging tree refuses materialization.
+pub fn materialize_issue_wiki_full_text_batch_manifest(
+    wiki_root: impl AsRef<Path>,
+    export: &IssueWikiBatchExport,
+) -> Result<IssueWikiBatchManifest, IssueWikiWriteError> {
+    materialize_issue_wiki_batch_manifest_with_contract(
+        wiki_root,
+        export,
+        &ISSUE_WIKI_FULL_TEXT_PROJECTION_CONTRACT,
+    )
+}
+
+fn materialize_issue_wiki_batch_manifest_with_contract(
+    wiki_root: impl AsRef<Path>,
+    export: &IssueWikiBatchExport,
+    contract: &IssueWikiProjectionContract,
+) -> Result<IssueWikiBatchManifest, IssueWikiWriteError> {
     let wiki_root = wiki_root.as_ref();
     let issue_export_hash = issue_wiki_export_hash(export);
     let mut entries = Vec::with_capacity(export.issues.len());
 
     for issue in &export.issues {
-        let projection = project_issue_wiki(issue.source.clone(), &issue.source_bytes);
+        let projection = (contract.project)(issue.source.clone(), &issue.source_bytes);
         let entry = match projection {
             IssueWikiProjectionResult::Accepted(_) => {
                 materialize_issue_wiki_batch_entry(wiki_root, &projection)?
@@ -2401,9 +2456,9 @@ pub fn materialize_issue_wiki_batch_manifest(
         schema_id: ISSUE_WIKI_BATCH_MANIFEST_SCHEMA_ID_V0.to_owned(),
         issue_export_hash,
         issue_set_selector: export.issue_set_selector.clone(),
-        projection_schema_id: ISSUE_WIKI_SCHEMA_ID_V0.to_owned(),
-        projector_id: ISSUE_WIKI_PROJECTOR.to_owned(),
-        projection_schema_digest: issue_wiki_projection_schema_digest(),
+        projection_schema_id: contract.projection_schema_id.to_owned(),
+        projector_id: contract.projector_id.to_owned(),
+        projection_schema_digest: issue_wiki_projection_schema_digest_for(contract),
         entries,
         manifest_key: ContentHashHex::new("0".repeat(64))
             .expect("zero placeholder is valid lowercase hex"),
@@ -2782,9 +2837,15 @@ fn issue_wiki_export_hash(export: &IssueWikiBatchExport) -> ContentHashHex {
 }
 
 fn issue_wiki_projection_schema_digest() -> ContentHashHex {
+    issue_wiki_projection_schema_digest_for(&ISSUE_WIKI_SUMMARY_PROJECTION_CONTRACT)
+}
+
+fn issue_wiki_projection_schema_digest_for(
+    contract: &IssueWikiProjectionContract,
+) -> ContentHashHex {
     let mut hasher = blake3::Hasher::new();
-    hash_part(&mut hasher, ISSUE_WIKI_SCHEMA_ID_V0.as_bytes());
-    hash_part(&mut hasher, ISSUE_WIKI_PROJECTOR.as_bytes());
+    hash_part(&mut hasher, contract.projection_schema_id.as_bytes());
+    hash_part(&mut hasher, contract.projector_id.as_bytes());
     hash_part(
         &mut hasher,
         ISSUE_WIKI_MUTATION_PLAN_SCHEMA_ID_V0.as_bytes(),
@@ -2803,6 +2864,28 @@ fn issue_wiki_projection_schema_digest() -> ContentHashHex {
     );
     ContentHashHex::new(hasher.finalize().to_hex().to_string())
         .expect("blake3 lowercase hex is always valid")
+}
+
+fn issue_wiki_projection_contract_for_manifest(
+    projection_schema_id: &str,
+    projector_id: &str,
+) -> Result<IssueWikiProjectionContract, String> {
+    match (projection_schema_id, projector_id) {
+        (ISSUE_WIKI_SCHEMA_ID_V0, ISSUE_WIKI_PROJECTOR) => {
+            Ok(ISSUE_WIKI_SUMMARY_PROJECTION_CONTRACT)
+        }
+        (ISSUE_WIKI_FULL_TEXT_SCHEMA_ID_V0, ISSUE_WIKI_FULL_TEXT_PROJECTOR) => {
+            Ok(ISSUE_WIKI_FULL_TEXT_PROJECTION_CONTRACT)
+        }
+        (ISSUE_WIKI_SCHEMA_ID_V0, actual_projector) => Err(format!(
+            "issue_wiki batch_manifest_projector_mismatch expected={} actual={}",
+            ISSUE_WIKI_PROJECTOR, actual_projector
+        )),
+        (actual_schema, _) => Err(format!(
+            "issue_wiki batch_manifest_projection_schema_mismatch expected={} actual={}",
+            ISSUE_WIKI_SCHEMA_ID_V0, actual_schema
+        )),
+    }
 }
 
 fn issue_wiki_batch_manifest_key(manifest: &IssueWikiBatchManifest) -> ContentHashHex {
@@ -3092,6 +3175,7 @@ mod tests {
                     value: title.to_owned(),
                     span: title_span.clone(),
                 },
+                full_text: None,
                 references: vec![IssueWikiReference {
                     target: target.to_owned(),
                     label: None,
@@ -3178,6 +3262,98 @@ mod tests {
         b"identity: attractor.issue.52.batch-manifest\n\
 title: Batch issue wiki migration manifest\n\
 reference: wiki:Attractor/Batch-Migration-Manifest\n"
+    }
+
+    fn phase2_issue_wiki_export_302() -> IssueWikiBatchExport {
+        let issues = (1..=302)
+            .map(|issue_number| {
+                let source_bytes = format!(
+                    "identity: attractor.issue.{issue_number}.phase-two\n\
+title: Phase 2 issue {issue_number}\n\
+body: Full body text for phase 2 issue {issue_number}; this must diverge from the summary payload.\n\
+reference: wiki:Attractor/Phase-2/Issue-{issue_number}\n"
+                )
+                .into_bytes();
+                let source_hash = hash_bytes(&source_bytes);
+                IssueWikiBatchIssue {
+                    source: IssueWikiSource {
+                        repo: "gwild/attractor".to_owned(),
+                        issue_number,
+                        source_ref: format!("github:gwild/attractor#{issue_number}"),
+                        source_hash,
+                    },
+                    source_bytes,
+                }
+            })
+            .collect();
+        IssueWikiBatchExport {
+            issue_set_selector: "repo=gwild/attractor published_wiki_refs=302".to_owned(),
+            issues,
+        }
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct BatchTransportDescriptor {
+        schema_id: String,
+        issue_export_hash: ContentHashHex,
+        issue_set_selector: String,
+        entries: Vec<EntryTransportDescriptor>,
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct EntryTransportDescriptor {
+        source_ref: String,
+        issue_number: u64,
+        source_hash: ContentHashHex,
+        page_path: String,
+        status: IssueWikiBatchStatus,
+        apply_receipt_fields: Vec<String>,
+        write_receipt_fields: Vec<String>,
+        apply_action: Option<IssueWikiApplyAction>,
+        write_action: Option<IssueWikiWriteAction>,
+        relative_file_path: Option<String>,
+    }
+
+    fn batch_transport_descriptor(manifest: &IssueWikiBatchManifest) -> BatchTransportDescriptor {
+        BatchTransportDescriptor {
+            schema_id: manifest.schema_id.clone(),
+            issue_export_hash: manifest.issue_export_hash.clone(),
+            issue_set_selector: manifest.issue_set_selector.clone(),
+            entries: manifest
+                .entries
+                .iter()
+                .map(|entry| EntryTransportDescriptor {
+                    source_ref: entry.source_ref.clone(),
+                    issue_number: entry.issue_number,
+                    source_hash: entry.source_hash.clone(),
+                    page_path: entry.page_path.clone(),
+                    status: entry.status,
+                    apply_receipt_fields: entry
+                        .apply_receipt
+                        .as_ref()
+                        .map(json_object_keys)
+                        .unwrap_or_default(),
+                    write_receipt_fields: entry
+                        .write_receipt
+                        .as_ref()
+                        .map(json_object_keys)
+                        .unwrap_or_default(),
+                    apply_action: entry.apply_receipt.as_ref().map(|receipt| receipt.action),
+                    write_action: entry.write_receipt.as_ref().map(|receipt| receipt.action),
+                    relative_file_path: entry
+                        .write_receipt
+                        .as_ref()
+                        .map(|receipt| receipt.relative_file_path.clone()),
+                })
+                .collect(),
+        }
+    }
+
+    fn json_object_keys(value: &impl Serialize) -> Vec<String> {
+        let serde_json::Value::Object(object) = serde_json::to_value(value).unwrap() else {
+            panic!("expected JSON object");
+        };
+        object.keys().cloned().collect()
     }
 
     #[derive(Default)]
@@ -3491,6 +3667,90 @@ reference: wiki:Attractor/Batch-Migration-Manifest\n"
         assert!(page.contains("# Batch issue wiki migration manifest"));
         assert!(!json.contains("identity: attractor.issue.52.batch-manifest"));
         assert!(!json.contains("reference: wiki:Attractor/Batch-Migration-Manifest"));
+    }
+
+    #[test]
+    fn full_text_projector_reuses_manifest_transport_descriptor_for_302_refs() {
+        let summary_dir = TestDir::new();
+        let full_text_dir = TestDir::new();
+        let export = phase2_issue_wiki_export_302();
+
+        let summary = materialize_issue_wiki_batch_manifest(summary_dir.path(), &export).unwrap();
+        let full_text =
+            materialize_issue_wiki_full_text_batch_manifest(full_text_dir.path(), &export).unwrap();
+        let first_summary = match project_issue_wiki(
+            export.issues[0].source.clone(),
+            &export.issues[0].source_bytes,
+        ) {
+            IssueWikiProjectionResult::Accepted(row) => row,
+            other => panic!("expected accepted summary projection, got {other:?}"),
+        };
+        let first_full_text = match project_issue_wiki_full_text(
+            export.issues[0].source.clone(),
+            &export.issues[0].source_bytes,
+        ) {
+            IssueWikiProjectionResult::Accepted(row) => row,
+            other => panic!("expected accepted full-text projection, got {other:?}"),
+        };
+
+        assert_eq!(summary.entries.len(), 302);
+        assert_eq!(full_text.entries.len(), 302);
+        assert_eq!(
+            batch_transport_descriptor(&summary),
+            batch_transport_descriptor(&full_text)
+        );
+        assert_eq!(summary.projector_id, ISSUE_WIKI_PROJECTOR);
+        assert_eq!(summary.projection_schema_id, ISSUE_WIKI_SCHEMA_ID_V0);
+        assert_eq!(full_text.projector_id, ISSUE_WIKI_FULL_TEXT_PROJECTOR);
+        assert_eq!(
+            full_text.projection_schema_id,
+            ISSUE_WIKI_FULL_TEXT_SCHEMA_ID_V0
+        );
+        assert_ne!(
+            summary.projection_schema_digest,
+            full_text.projection_schema_digest
+        );
+        assert_ne!(summary.manifest_key, full_text.manifest_key);
+        assert_ne!(
+            serde_json::to_vec(&first_summary.note).unwrap(),
+            serde_json::to_vec(&first_full_text.note).unwrap()
+        );
+        assert!(first_summary.note.full_text.is_none());
+        assert!(first_full_text
+            .note
+            .full_text
+            .as_ref()
+            .unwrap()
+            .value
+            .contains("Full body text for phase 2 issue 1"));
+
+        for (summary_entry, full_text_entry) in summary.entries.iter().zip(&full_text.entries) {
+            assert_eq!(summary_entry.page_path, full_text_entry.page_path);
+            assert_eq!(summary_entry.status, full_text_entry.status);
+            assert_ne!(summary_entry.apply_key, full_text_entry.apply_key);
+            assert_ne!(summary_entry.write_key, full_text_entry.write_key);
+        }
+
+        let mut payload_kind_tamper = serde_json::to_value(&full_text).unwrap();
+        payload_kind_tamper["entries"][0]["apply_receipt"]["payload_kind"] =
+            serde_json::Value::String("full_text".to_owned());
+        let err =
+            serde_json::from_value::<IssueWikiBatchManifest>(payload_kind_tamper).unwrap_err();
+        assert!(err.to_string().contains("payload_kind"));
+
+        let live = TestDir::new();
+        let mut push = RecordingPush::default();
+        let manifest_json = serde_json::to_vec(&full_text).unwrap();
+        let err = publish_issue_wiki_batch_manifest_json(
+            live.path(),
+            &manifest_json,
+            &full_text.manifest_key,
+            true,
+            &mut push,
+        )
+        .unwrap_err();
+        assert!(matches!(err, IssueWikiPublishError::StaleProjection { .. }));
+        assert_eq!(push.calls, 0);
     }
 
     #[test]
