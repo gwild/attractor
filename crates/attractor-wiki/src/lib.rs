@@ -545,6 +545,24 @@ impl IssueWikiBatchManifestEntry {
                     self.page_path, write.page_path
                 ));
             }
+            if write.pre_write_snapshot != apply.actual_snapshot {
+                return Err(format!(
+                    "issue_wiki batch_manifest_write_pre_snapshot_mismatch write={} apply={}",
+                    write.pre_write_snapshot.page_hash.as_str(),
+                    apply.actual_snapshot.page_hash.as_str()
+                ));
+            }
+            let expected_post_hash = issue_wiki_page_snapshot_hash(
+                &apply.actual_snapshot.page_path,
+                render_issue_wiki_page(apply).as_bytes(),
+            );
+            if write.post_write_snapshot.page_hash != expected_post_hash {
+                return Err(format!(
+                    "issue_wiki batch_manifest_write_post_snapshot_mismatch expected={} actual={}",
+                    expected_post_hash.as_str(),
+                    write.post_write_snapshot.page_hash.as_str()
+                ));
+            }
         } else if self.write_key.is_some() || self.write_receipt.is_some() {
             return Err("issue_wiki batch_manifest_unexpected_write_receipt".to_owned());
         }
@@ -1698,6 +1716,48 @@ reference: wiki:Attractor/Batch-Migration-Manifest\n"
         assert!(err
             .to_string()
             .contains("batch_manifest_status_action_mismatch"));
+    }
+
+    #[test]
+    fn batch_manifest_write_pre_snapshot_rejects_recomputed_key_tamper() {
+        let dir = TestDir::new();
+        let export = issue_export("repo=gwild/attractor issue=52", 52, issue_source_bytes());
+        let mut manifest = materialize_issue_wiki_batch_manifest(dir.path(), &export).unwrap();
+        let entry = &mut manifest.entries[0];
+        let write = entry.write_receipt.as_mut().unwrap();
+        write.pre_write_snapshot =
+            IssueWikiPageSnapshot::from_page_bytes(entry.page_path.clone(), b"forged before bytes");
+        write.write_key = issue_wiki_write_key(write);
+        entry.write_key = Some(write.write_key.clone());
+        manifest.manifest_key = issue_wiki_batch_manifest_key(&manifest);
+        let value = serde_json::to_value(manifest).unwrap();
+
+        let err = serde_json::from_value::<IssueWikiBatchManifest>(value).unwrap_err();
+
+        assert!(err
+            .to_string()
+            .contains("batch_manifest_write_pre_snapshot_mismatch"));
+    }
+
+    #[test]
+    fn batch_manifest_write_post_snapshot_rejects_recomputed_key_tamper() {
+        let dir = TestDir::new();
+        let export = issue_export("repo=gwild/attractor issue=52", 52, issue_source_bytes());
+        let mut manifest = materialize_issue_wiki_batch_manifest(dir.path(), &export).unwrap();
+        let entry = &mut manifest.entries[0];
+        let write = entry.write_receipt.as_mut().unwrap();
+        write.post_write_snapshot =
+            IssueWikiPageSnapshot::from_page_bytes(entry.page_path.clone(), b"forged after bytes");
+        write.write_key = issue_wiki_write_key(write);
+        entry.write_key = Some(write.write_key.clone());
+        manifest.manifest_key = issue_wiki_batch_manifest_key(&manifest);
+        let value = serde_json::to_value(manifest).unwrap();
+
+        let err = serde_json::from_value::<IssueWikiBatchManifest>(value).unwrap_err();
+
+        assert!(err
+            .to_string()
+            .contains("batch_manifest_write_post_snapshot_mismatch"));
     }
 
     #[test]
