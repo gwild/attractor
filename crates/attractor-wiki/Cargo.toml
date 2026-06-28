@@ -2,12 +2,13 @@
 name = "attractor-wiki"
 version = "0.0.0"
 edition = "2021"
-# Local filesystem materializer only: no network, no git push, no OS-specific deps.
+# Local filesystem materializer plus the gated publish boundary. Live IO is
+# behind explicit caller opt-in and a transport trait so tests stay no-network.
 # Follows the Rust 1.96 store/projector leg because batch manifests run the
 # issue-wiki projector before local materialization.
 rust-version = "1.96"
 license = "MIT OR Apache-2.0"
-description = "No-network issue-wiki write boundary: materialize validated apply receipts into a caller-supplied wiki tree and emit durable write receipts."
+description = "Issue-wiki write and publish boundary: materialize validated receipts and publish frozen manifests with durable receipts."
 repository = "https://github.com/gwild/attractor"
 
 [dependencies]
