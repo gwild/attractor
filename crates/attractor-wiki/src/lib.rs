@@ -37,6 +37,10 @@ pub const ISSUE_WIKI_BATCH_CLAIM_LEDGER_SCHEMA_ID_V0: &str =
     "attractor.issue_wiki.batch_claim_ledger.v0";
 /// Stable schema id for serialized issue-wiki publish leases.
 pub const ISSUE_WIKI_PUBLISH_LEASE_SCHEMA_ID_V0: &str = "attractor.issue_wiki.publish_lease.v0";
+/// Stable schema id for full-text post-lease batch reports.
+pub const ISSUE_WIKI_FULL_TEXT_BATCH_REPORT_SCHEMA_ID_V0: &str =
+    "attractor.issue_wiki.full_text_batch_report.v0";
+const ISSUE_WIKI_FULL_TEXT_RENDER_MARKER_V0: &str = "attractor:issue-wiki-full-text.v0";
 
 #[derive(Clone, Copy, Debug)]
 struct IssueWikiProjectionContract {
@@ -311,6 +315,56 @@ pub struct IssueWikiBatchRunReceipt {
     pub run_key: ContentHashHex,
 }
 
+/// Explicit guards required before a live full-text batch driver can publish.
+pub struct IssueWikiFullTextBatchDriverGuard<'a> {
+    /// Exact export hash the caller intended to publish.
+    pub expected_issue_export_hash: &'a ContentHashHex,
+    /// Exact selector the caller intended to publish.
+    pub expected_issue_set_selector: &'a str,
+    /// Active roster hash for the serialized publish lane.
+    pub active_roster_hash: &'a ContentHashHex,
+    /// Serialized lease authorizing the manifest key and queue slot.
+    pub lease: &'a IssueWikiPublishLease,
+}
+
+/// Count basis that makes full-text batch reports comparable.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueWikiFullTextCountBasis {
+    /// Wiki head observed after the serialized publish lease released.
+    pub wiki_head_after_lease: String,
+    /// Digest of the selector universe this report counts.
+    pub selector_digest: ContentHashHex,
+    /// Full-text projection schema digest required in rendered page markers.
+    pub full_text_schema_digest: ContentHashHex,
+}
+
+/// Durable post-lease report for one full-text publish batch.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct IssueWikiFullTextBatchReportReceipt {
+    /// Schema id this report used.
+    pub schema_id: String,
+    /// Coordinator batch identifier.
+    pub batch_id: String,
+    /// Selector/lane label assigned to this writer.
+    pub selector_lane: String,
+    /// Count basis bound into the report identity.
+    pub count_basis: IssueWikiFullTextCountBasis,
+    /// Pages written by the publish receipt.
+    pub written: u64,
+    /// Pages already matching the manifest at publish time.
+    pub noop: u64,
+    /// Manifest rows refused before publish.
+    pub refused: u64,
+    /// Selector-universe pages still lacking rendered full text at this wiki head.
+    pub remaining_text: u64,
+    /// Machine-readable reasons for noop rows.
+    pub noop_reasons: Vec<String>,
+    /// Machine-readable reasons for refused rows.
+    pub refused_reasons: Vec<String>,
+    /// Deterministic key for this basis-bound report.
+    pub report_key: ContentHashHex,
+}
+
 /// Immutable roster entry for deterministic issue partitioning.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IssueWikiBatchPartitionRosterEntry {
@@ -428,6 +482,35 @@ impl<'de> Deserialize<'de> for IssueWikiBatchRunReceipt {
     }
 }
 
+impl<'de> Deserialize<'de> for IssueWikiFullTextBatchReportReceipt {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let receipt = IssueWikiFullTextBatchReportReceiptWire::deserialize(deserializer)?;
+        let receipt = Self {
+            schema_id: receipt.schema_id,
+            batch_id: receipt.batch_id,
+            selector_lane: receipt.selector_lane,
+            count_basis: receipt.count_basis,
+            written: receipt.written,
+            noop: receipt.noop,
+            refused: receipt.refused,
+            remaining_text: receipt.remaining_text,
+            noop_reasons: receipt.noop_reasons,
+            refused_reasons: receipt.refused_reasons,
+            report_key: receipt.report_key,
+        };
+        receipt
+            .validate_report_key()
+            .map_err(serde::de::Error::custom)?;
+        receipt
+            .validate_structural_invariants()
+            .map_err(serde::de::Error::custom)?;
+        Ok(receipt)
+    }
+}
+
 impl<'de> Deserialize<'de> for IssueWikiBatchClaim {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -526,6 +609,22 @@ struct IssueWikiBatchRunReceiptWire {
     publish_key: ContentHashHex,
     status: IssueWikiBatchRunStatus,
     run_key: ContentHashHex,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct IssueWikiFullTextBatchReportReceiptWire {
+    schema_id: String,
+    batch_id: String,
+    selector_lane: String,
+    count_basis: IssueWikiFullTextCountBasis,
+    written: u64,
+    noop: u64,
+    refused: u64,
+    remaining_text: u64,
+    noop_reasons: Vec<String>,
+    refused_reasons: Vec<String>,
+    report_key: ContentHashHex,
 }
 
 #[derive(Deserialize)]
@@ -916,6 +1015,40 @@ impl IssueWikiBatchRunReceipt {
                     "issue_wiki batch_run_publish_pre_snapshot_mismatch index={index}"
                 ));
             }
+        }
+        Ok(())
+    }
+}
+
+impl IssueWikiFullTextBatchReportReceipt {
+    fn validate_report_key(&self) -> Result<(), String> {
+        let expected = issue_wiki_full_text_batch_report_key(self);
+        if self.report_key == expected {
+            Ok(())
+        } else {
+            Err(format!(
+                "issue_wiki full_text_report_key_mismatch expected={} actual={}",
+                expected.as_str(),
+                self.report_key.as_str()
+            ))
+        }
+    }
+
+    fn validate_structural_invariants(&self) -> Result<(), String> {
+        if self.schema_id != ISSUE_WIKI_FULL_TEXT_BATCH_REPORT_SCHEMA_ID_V0 {
+            return Err(format!(
+                "issue_wiki full_text_report_schema_mismatch expected={} actual={}",
+                ISSUE_WIKI_FULL_TEXT_BATCH_REPORT_SCHEMA_ID_V0, self.schema_id
+            ));
+        }
+        if self.batch_id.trim().is_empty() {
+            return Err("issue_wiki full_text_report_empty_batch_id".to_owned());
+        }
+        if self.selector_lane.trim().is_empty() {
+            return Err("issue_wiki full_text_report_empty_selector_lane".to_owned());
+        }
+        if self.count_basis.wiki_head_after_lease.trim().is_empty() {
+            return Err("issue_wiki full_text_report_empty_wiki_head".to_owned());
         }
         Ok(())
     }
@@ -1738,6 +1871,21 @@ pub enum IssueWikiBatchClaimError {
     Manifest(IssueWikiWriteError),
 }
 
+/// Post-lease full-text report errors.
+#[derive(Debug)]
+pub enum IssueWikiFullTextBatchReportError {
+    /// The observed wiki head/selector/schema basis is not comparable to the
+    /// caller's expected basis.
+    NonComparableBasis {
+        expected: Box<IssueWikiFullTextCountBasis>,
+        actual: Box<IssueWikiFullTextCountBasis>,
+    },
+    /// Manifest and publish receipt do not refer to the same batch.
+    ManifestPublishMismatch { reason: String },
+    /// Page read-back failed.
+    ReadBack(IssueWikiWriteError),
+}
+
 impl fmt::Display for IssueWikiBatchClaimError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -1756,6 +1904,29 @@ impl fmt::Display for IssueWikiBatchClaimError {
 }
 
 impl std::error::Error for IssueWikiBatchClaimError {}
+
+impl fmt::Display for IssueWikiFullTextBatchReportError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NonComparableBasis { expected, actual } => write!(
+                f,
+                "issue_wiki full_text_report_non_comparable_basis expected_head={} actual_head={} expected_selector={} actual_selector={} expected_schema={} actual_schema={}",
+                expected.wiki_head_after_lease,
+                actual.wiki_head_after_lease,
+                expected.selector_digest.as_str(),
+                actual.selector_digest.as_str(),
+                expected.full_text_schema_digest.as_str(),
+                actual.full_text_schema_digest.as_str()
+            ),
+            Self::ManifestPublishMismatch { reason } => {
+                write!(f, "issue_wiki full_text_report_manifest_publish_mismatch {reason}")
+            }
+            Self::ReadBack(err) => write!(f, "{err}"),
+        }
+    }
+}
+
+impl std::error::Error for IssueWikiFullTextBatchReportError {}
 
 impl fmt::Display for IssueWikiBatchRunError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -1911,6 +2082,97 @@ pub fn run_issue_wiki_batch_driver(
     })
 }
 
+/// Run the full-text issue-to-wiki orchestration driver for one export.
+///
+/// This mirrors [`run_issue_wiki_batch_driver`] but materializes and publishes
+/// the full-text projection contract through a serialized publish lease.
+/// Post-lease remaining-text counts are intentionally produced by
+/// [`report_issue_wiki_full_text_batch_after_lease`] from rendered wiki
+/// read-back.
+///
+/// # Errors
+/// Returns [`IssueWikiBatchRunError`] before publish when export identity is not
+/// explicit/current or any manifest row is non-publishable. Full-text publish
+/// errors are surfaced from
+/// [`publish_issue_wiki_full_text_batch_manifest_json_with_lease`].
+pub fn run_issue_wiki_full_text_batch_driver(
+    staging_wiki_root: impl AsRef<Path>,
+    live_wiki_root: impl AsRef<Path>,
+    export: &IssueWikiBatchExport,
+    guard: &IssueWikiFullTextBatchDriverGuard<'_>,
+    explicit_publish_opt_in: bool,
+    transport: &mut impl IssueWikiPublishTransport,
+) -> Result<IssueWikiBatchRunReceipt, IssueWikiBatchRunError> {
+    let staging_wiki_root = staging_wiki_root.as_ref();
+    let live_wiki_root = live_wiki_root.as_ref();
+    reject_same_wiki_root(staging_wiki_root, live_wiki_root)?;
+    let actual_export_hash = issue_wiki_batch_export_hash(export);
+    if &actual_export_hash != guard.expected_issue_export_hash {
+        return Err(IssueWikiBatchRunError::ExportHashMismatch {
+            expected: guard.expected_issue_export_hash.clone(),
+            actual: actual_export_hash,
+        });
+    }
+    if export.issue_set_selector != guard.expected_issue_set_selector {
+        return Err(IssueWikiBatchRunError::SelectorMismatch {
+            expected: guard.expected_issue_set_selector.to_owned(),
+            actual: export.issue_set_selector.clone(),
+        });
+    }
+
+    let manifest = materialize_issue_wiki_full_text_batch_manifest(staging_wiki_root, export)
+        .map_err(IssueWikiBatchRunError::Manifest)?;
+    if let Some(entry) = manifest.entries.iter().find(|entry| {
+        !matches!(
+            entry.status,
+            IssueWikiBatchStatus::Written | IssueWikiBatchStatus::Noop
+        )
+    }) {
+        return Err(IssueWikiBatchRunError::NonPublishableManifest {
+            manifest_key: manifest.manifest_key.clone(),
+            source_ref: entry.source_ref.clone(),
+            status: entry.status,
+            reason: entry.reason.clone(),
+        });
+    }
+
+    let manifest_json =
+        serde_json::to_vec(&manifest).map_err(|err| IssueWikiBatchRunError::ManifestSerialize {
+            reason: err.to_string(),
+        })?;
+    let publish_receipt = publish_issue_wiki_full_text_batch_manifest_json_with_lease(
+        live_wiki_root,
+        &manifest_json,
+        &manifest.manifest_key,
+        guard.active_roster_hash,
+        guard.lease,
+        explicit_publish_opt_in,
+        transport,
+    )
+    .map_err(IssueWikiBatchRunError::Publish)?;
+    let status = if publish_receipt.pushed {
+        IssueWikiBatchRunStatus::Published
+    } else {
+        IssueWikiBatchRunStatus::Noop
+    };
+    let receipt = IssueWikiBatchRunReceipt {
+        schema_id: ISSUE_WIKI_BATCH_RUN_RECEIPT_SCHEMA_ID_V0.to_owned(),
+        issue_export_hash: manifest.issue_export_hash.clone(),
+        issue_set_selector: manifest.issue_set_selector.clone(),
+        manifest_key: manifest.manifest_key.clone(),
+        publish_key: publish_receipt.publish_key.clone(),
+        status,
+        manifest,
+        publish_receipt,
+        run_key: ContentHashHex::new("0".repeat(64))
+            .expect("zero placeholder is valid lowercase hex"),
+    };
+    Ok(IssueWikiBatchRunReceipt {
+        run_key: issue_wiki_batch_run_key(&receipt),
+        ..receipt
+    })
+}
+
 /// Verify that an export exactly matches the coordinator-assigned claim.
 ///
 /// This is the parallel-prep boundary: agents may materialize manifests in
@@ -1963,6 +2225,21 @@ pub fn materialize_claimed_issue_wiki_batch_manifest(
 ) -> Result<IssueWikiBatchManifest, IssueWikiBatchClaimError> {
     validate_issue_wiki_export_claim(export, claim)?;
     materialize_issue_wiki_batch_manifest(wiki_root, export)
+        .map_err(IssueWikiBatchClaimError::Manifest)
+}
+
+/// Materialize a claimed full-text batch only after it matches its assigned claim.
+///
+/// # Errors
+/// Returns [`IssueWikiBatchClaimError`] if the export is outside its claim or if
+/// full-text manifest construction fails.
+pub fn materialize_claimed_issue_wiki_full_text_batch_manifest(
+    wiki_root: impl AsRef<Path>,
+    export: &IssueWikiBatchExport,
+    claim: &IssueWikiBatchClaim,
+) -> Result<IssueWikiBatchManifest, IssueWikiBatchClaimError> {
+    validate_issue_wiki_export_claim(export, claim)?;
+    materialize_issue_wiki_full_text_batch_manifest(wiki_root, export)
         .map_err(IssueWikiBatchClaimError::Manifest)
 }
 
@@ -2075,6 +2352,146 @@ pub fn issue_wiki_publish_lease(
     }
 }
 
+/// Build the expected full-text report basis for a manifest selector and wiki head.
+#[must_use]
+pub fn issue_wiki_full_text_count_basis(
+    wiki_head_after_lease: impl Into<String>,
+    issue_set_selector: &str,
+) -> IssueWikiFullTextCountBasis {
+    IssueWikiFullTextCountBasis {
+        wiki_head_after_lease: wiki_head_after_lease.into(),
+        selector_digest: issue_wiki_selector_digest(issue_set_selector),
+        full_text_schema_digest: issue_wiki_full_text_projection_schema_digest(),
+    }
+}
+
+/// Build a post-lease full-text batch report from live wiki read-back.
+///
+/// `remaining_text` is recomputed from rendered pages at the supplied wiki
+/// head. Projection evidence alone never decrements the count.
+///
+/// # Errors
+/// Returns [`IssueWikiFullTextBatchReportError`] when the count basis is not
+/// comparable, the publish receipt does not match the manifest, or read-back
+/// fails.
+pub fn report_issue_wiki_full_text_batch_after_lease(
+    wiki_root: impl AsRef<Path>,
+    batch_id: impl Into<String>,
+    selector_lane: impl Into<String>,
+    manifest: &IssueWikiBatchManifest,
+    publish_receipt: &IssueWikiPublishReceipt,
+    expected_basis: &IssueWikiFullTextCountBasis,
+    wiki_head_after_lease: impl Into<String>,
+) -> Result<IssueWikiFullTextBatchReportReceipt, IssueWikiFullTextBatchReportError> {
+    if publish_receipt.manifest_key != manifest.manifest_key {
+        return Err(IssueWikiFullTextBatchReportError::ManifestPublishMismatch {
+            reason: format!(
+                "manifest_key expected={} actual={}",
+                manifest.manifest_key.as_str(),
+                publish_receipt.manifest_key.as_str()
+            ),
+        });
+    }
+    if publish_receipt.projection_schema_digest != manifest.projection_schema_digest {
+        return Err(IssueWikiFullTextBatchReportError::ManifestPublishMismatch {
+            reason: "projection_schema_digest".to_owned(),
+        });
+    }
+    let actual_basis =
+        issue_wiki_full_text_count_basis(wiki_head_after_lease, &manifest.issue_set_selector);
+    if &actual_basis != expected_basis {
+        return Err(IssueWikiFullTextBatchReportError::NonComparableBasis {
+            expected: Box::new(expected_basis.clone()),
+            actual: Box::new(actual_basis),
+        });
+    }
+
+    let wiki_root = wiki_root.as_ref();
+    let full_text_digest = &expected_basis.full_text_schema_digest;
+    let mut remaining_text = 0_u64;
+    for entry in &manifest.entries {
+        if entry.page_path.is_empty() {
+            remaining_text += 1;
+            continue;
+        }
+        let expected_payload_hash = entry
+            .apply_receipt
+            .as_ref()
+            .and_then(|receipt| receipt.full_text.as_ref())
+            .map(|full_text| issue_wiki_full_text_payload_hash(&full_text.value));
+        let relative = relative_page_file_path(&entry.page_path)
+            .map_err(IssueWikiFullTextBatchReportError::ReadBack)?;
+        reject_symlink_boundary(wiki_root, &relative)
+            .map_err(IssueWikiFullTextBatchReportError::ReadBack)?;
+        let full_path = wiki_root.join(&relative);
+        let (_, bytes) = read_existing_or_empty(&full_path)
+            .map_err(IssueWikiFullTextBatchReportError::ReadBack)?;
+        let has_full_text = std::str::from_utf8(&bytes).ok().is_some_and(|text| {
+            rendered_page_has_full_text_marker(
+                text,
+                full_text_digest,
+                expected_payload_hash.as_ref(),
+            )
+        });
+        if !has_full_text {
+            remaining_text += 1;
+        }
+    }
+
+    let written = publish_receipt
+        .entries
+        .iter()
+        .filter(|entry| entry.action == IssueWikiPublishAction::Published)
+        .count() as u64;
+    let noop = publish_receipt
+        .entries
+        .iter()
+        .filter(|entry| entry.action == IssueWikiPublishAction::Noop)
+        .count() as u64;
+    let refused_reasons = manifest
+        .entries
+        .iter()
+        .filter(|entry| {
+            !matches!(
+                entry.status,
+                IssueWikiBatchStatus::Written | IssueWikiBatchStatus::Noop
+            )
+        })
+        .map(|entry| {
+            format!(
+                "{}:{}:{}",
+                entry.source_ref,
+                entry.status.as_str(),
+                entry.reason.as_deref().unwrap_or("none")
+            )
+        })
+        .collect::<Vec<_>>();
+    let noop_reasons = publish_receipt
+        .entries
+        .iter()
+        .filter(|entry| entry.action == IssueWikiPublishAction::Noop)
+        .map(|entry| format!("{}:already_rendered", entry.page_path))
+        .collect::<Vec<_>>();
+    let receipt = IssueWikiFullTextBatchReportReceipt {
+        schema_id: ISSUE_WIKI_FULL_TEXT_BATCH_REPORT_SCHEMA_ID_V0.to_owned(),
+        batch_id: batch_id.into(),
+        selector_lane: selector_lane.into(),
+        count_basis: expected_basis.clone(),
+        written,
+        noop,
+        refused: refused_reasons.len() as u64,
+        remaining_text,
+        noop_reasons,
+        refused_reasons,
+        report_key: ContentHashHex::new("0".repeat(64))
+            .expect("zero placeholder is valid lowercase hex"),
+    };
+    Ok(IssueWikiFullTextBatchReportReceipt {
+        report_key: issue_wiki_full_text_batch_report_key(&receipt),
+        ..receipt
+    })
+}
+
 /// Publish a frozen issue-wiki batch manifest into a wiki checkout and enter the
 /// supplied transport only if the checkout changed.
 ///
@@ -2101,6 +2518,32 @@ pub fn publish_issue_wiki_batch_manifest_json(
         expected_manifest_key,
         explicit_opt_in,
         &issue_wiki_projection_schema_digest(),
+        transport,
+    )
+}
+
+/// Publish a frozen full-text manifest into a wiki checkout.
+///
+/// This is separate from the summary publisher so live full-text writes must
+/// opt into the full-text schema digest explicitly.
+///
+/// # Errors
+/// Returns [`IssueWikiPublishError`] under the same conditions as
+/// [`publish_issue_wiki_batch_manifest_json`], but validates against the
+/// full-text projection schema digest.
+fn publish_issue_wiki_full_text_batch_manifest_json(
+    wiki_root: impl AsRef<Path>,
+    manifest_json: &[u8],
+    expected_manifest_key: &ContentHashHex,
+    explicit_opt_in: bool,
+    transport: &mut impl IssueWikiPublishTransport,
+) -> Result<IssueWikiPublishReceipt, IssueWikiPublishError> {
+    publish_issue_wiki_batch_manifest_json_with_digest(
+        wiki_root,
+        manifest_json,
+        expected_manifest_key,
+        explicit_opt_in,
+        &issue_wiki_full_text_projection_schema_digest(),
         transport,
     )
 }
@@ -2143,6 +2586,47 @@ pub fn publish_issue_wiki_batch_manifest_json_with_lease(
         });
     }
     publish_issue_wiki_batch_manifest_json(
+        wiki_root,
+        manifest_json,
+        expected_manifest_key,
+        explicit_opt_in,
+        transport,
+    )
+}
+
+/// Publish a frozen full-text manifest only when a serialized lease names its key.
+///
+/// # Errors
+/// Returns [`IssueWikiPublishError`] if the lease guard or full-text publish
+/// boundary refuses.
+pub fn publish_issue_wiki_full_text_batch_manifest_json_with_lease(
+    wiki_root: impl AsRef<Path>,
+    manifest_json: &[u8],
+    expected_manifest_key: &ContentHashHex,
+    active_roster_hash: &ContentHashHex,
+    lease: &IssueWikiPublishLease,
+    explicit_opt_in: bool,
+    transport: &mut impl IssueWikiPublishTransport,
+) -> Result<IssueWikiPublishReceipt, IssueWikiPublishError> {
+    lease
+        .validate_structural_invariants()
+        .map_err(|reason| IssueWikiPublishError::InvalidLease { reason })?;
+    lease
+        .validate_lease_key()
+        .map_err(|reason| IssueWikiPublishError::InvalidLease { reason })?;
+    if &lease.roster_hash != active_roster_hash {
+        return Err(IssueWikiPublishError::LeaseRosterMismatch {
+            expected: active_roster_hash.clone(),
+            actual: lease.roster_hash.clone(),
+        });
+    }
+    if &lease.manifest_key != expected_manifest_key {
+        return Err(IssueWikiPublishError::LeaseManifestMismatch {
+            expected: expected_manifest_key.clone(),
+            actual: lease.manifest_key.clone(),
+        });
+    }
+    publish_issue_wiki_full_text_batch_manifest_json(
         wiki_root,
         manifest_json,
         expected_manifest_key,
@@ -2667,6 +3151,9 @@ fn parse_materialized_current_note(bytes: &[u8]) -> Option<IssueWikiCurrentNote>
             continue;
         }
         if in_references {
+            if line.starts_with("## ") {
+                break;
+            }
             if let Some(reference) = line.strip_prefix("- ") {
                 if reference != "none" {
                     references.push(reference.to_owned());
@@ -2674,17 +3161,19 @@ fn parse_materialized_current_note(bytes: &[u8]) -> Option<IssueWikiCurrentNote>
             }
         }
     }
+    let full_text = rendered_full_text_body(text, &issue_wiki_full_text_projection_schema_digest());
     Some(IssueWikiCurrentNote {
         identity,
         title,
         references,
+        full_text,
     })
 }
 
 /// Deterministic full-page markdown emitted by the local materializer.
 ///
-/// It contains only typed receipt fields: identity, title, reference targets,
-/// and receipt provenance keys. It never carries raw issue body text.
+/// It contains typed receipt fields and, for full-text receipts, a schema-bound
+/// full-text marker that post-lease reports can verify by read-back.
 #[must_use]
 pub fn render_issue_wiki_page(receipt: &IssueWikiApplyReceipt) -> String {
     let mut out = String::new();
@@ -2714,7 +3203,53 @@ pub fn render_issue_wiki_page(receipt: &IssueWikiApplyReceipt) -> String {
             out.push('\n');
         }
     }
+    if let Some(full_text) = &receipt.full_text {
+        out.push_str("\n## Full Text\n");
+        out.push_str("<!-- ");
+        out.push_str(ISSUE_WIKI_FULL_TEXT_RENDER_MARKER_V0);
+        out.push_str(" schema_digest=");
+        out.push_str(issue_wiki_full_text_projection_schema_digest().as_str());
+        out.push_str(" payload_hash=");
+        out.push_str(issue_wiki_full_text_payload_hash(&full_text.value).as_str());
+        out.push_str(" -->\n");
+        out.push_str(&full_text.value);
+        if !full_text.value.ends_with('\n') {
+            out.push('\n');
+        }
+    }
     out
+}
+
+fn rendered_full_text_body(text: &str, expected_schema_digest: &ContentHashHex) -> Option<String> {
+    let marker_prefix = format!(
+        "<!-- {} schema_digest={} payload_hash=",
+        ISSUE_WIKI_FULL_TEXT_RENDER_MARKER_V0,
+        expected_schema_digest.as_str()
+    );
+    let marker_start = text.find(&marker_prefix)?;
+    let marker_line = text[marker_start..].lines().next()?;
+    if !marker_line.starts_with(&marker_prefix) || !marker_line.ends_with(" -->") {
+        return None;
+    }
+    let body_start = marker_start + marker_line.len();
+    let body = text[body_start..].strip_prefix('\n')?;
+    let body = body.strip_suffix('\n').unwrap_or(body);
+    Some(body.to_owned())
+}
+
+fn rendered_page_has_full_text_marker(
+    text: &str,
+    expected_schema_digest: &ContentHashHex,
+    expected_payload_hash: Option<&ContentHashHex>,
+) -> bool {
+    let Some(body) = rendered_full_text_body(text, expected_schema_digest) else {
+        return false;
+    };
+    if body.trim().is_empty() {
+        return false;
+    }
+    expected_payload_hash
+        .is_none_or(|expected| issue_wiki_full_text_payload_hash(&body) == *expected)
 }
 
 fn read_existing_or_empty(path: &Path) -> Result<(bool, Vec<u8>), IssueWikiWriteError> {
@@ -2836,8 +3371,26 @@ fn issue_wiki_export_hash(export: &IssueWikiBatchExport) -> ContentHashHex {
         .expect("blake3 lowercase hex is always valid")
 }
 
+fn issue_wiki_selector_digest(issue_set_selector: &str) -> ContentHashHex {
+    let mut hasher = blake3::Hasher::new();
+    hash_part(&mut hasher, issue_set_selector.as_bytes());
+    ContentHashHex::new(hasher.finalize().to_hex().to_string())
+        .expect("blake3 lowercase hex is always valid")
+}
+
+fn issue_wiki_full_text_payload_hash(value: &str) -> ContentHashHex {
+    let mut hasher = blake3::Hasher::new();
+    hash_part(&mut hasher, value.as_bytes());
+    ContentHashHex::new(hasher.finalize().to_hex().to_string())
+        .expect("blake3 lowercase hex is always valid")
+}
+
 fn issue_wiki_projection_schema_digest() -> ContentHashHex {
     issue_wiki_projection_schema_digest_for(&ISSUE_WIKI_SUMMARY_PROJECTION_CONTRACT)
+}
+
+fn issue_wiki_full_text_projection_schema_digest() -> ContentHashHex {
+    issue_wiki_projection_schema_digest_for(&ISSUE_WIKI_FULL_TEXT_PROJECTION_CONTRACT)
 }
 
 fn issue_wiki_projection_schema_digest_for(
@@ -2862,6 +3415,15 @@ fn issue_wiki_projection_schema_digest_for(
         &mut hasher,
         ISSUE_WIKI_BATCH_MANIFEST_SCHEMA_ID_V0.as_bytes(),
     );
+    hash_part(
+        &mut hasher,
+        ISSUE_WIKI_FULL_TEXT_BATCH_REPORT_SCHEMA_ID_V0.as_bytes(),
+    );
+    hash_part(
+        &mut hasher,
+        ISSUE_WIKI_FULL_TEXT_RENDER_MARKER_V0.as_bytes(),
+    );
+    hash_part(&mut hasher, b"payload_hash");
     ContentHashHex::new(hasher.finalize().to_hex().to_string())
         .expect("blake3 lowercase hex is always valid")
 }
@@ -2960,6 +3522,43 @@ fn issue_wiki_batch_run_key(receipt: &IssueWikiBatchRunReceipt) -> ContentHashHe
     hash_part(&mut hasher, receipt.manifest_key.as_str().as_bytes());
     hash_part(&mut hasher, receipt.publish_key.as_str().as_bytes());
     hash_part(&mut hasher, receipt.status.as_str().as_bytes());
+    ContentHashHex::new(hasher.finalize().to_hex().to_string())
+        .expect("blake3 lowercase hex is always valid")
+}
+
+fn issue_wiki_full_text_batch_report_key(
+    receipt: &IssueWikiFullTextBatchReportReceipt,
+) -> ContentHashHex {
+    let mut hasher = blake3::Hasher::new();
+    hash_part(&mut hasher, receipt.schema_id.as_bytes());
+    hash_part(&mut hasher, receipt.batch_id.as_bytes());
+    hash_part(&mut hasher, receipt.selector_lane.as_bytes());
+    hash_part(
+        &mut hasher,
+        receipt.count_basis.wiki_head_after_lease.as_bytes(),
+    );
+    hash_part(
+        &mut hasher,
+        receipt.count_basis.selector_digest.as_str().as_bytes(),
+    );
+    hash_part(
+        &mut hasher,
+        receipt
+            .count_basis
+            .full_text_schema_digest
+            .as_str()
+            .as_bytes(),
+    );
+    hash_part(&mut hasher, &receipt.written.to_le_bytes());
+    hash_part(&mut hasher, &receipt.noop.to_le_bytes());
+    hash_part(&mut hasher, &receipt.refused.to_le_bytes());
+    hash_part(&mut hasher, &receipt.remaining_text.to_le_bytes());
+    for reason in &receipt.noop_reasons {
+        hash_part(&mut hasher, reason.as_bytes());
+    }
+    for reason in &receipt.refused_reasons {
+        hash_part(&mut hasher, reason.as_bytes());
+    }
     ContentHashHex::new(hasher.finalize().to_hex().to_string())
         .expect("blake3 lowercase hex is always valid")
 }
@@ -3331,7 +3930,11 @@ reference: wiki:Attractor/Phase-2/Issue-{issue_number}\n"
                     apply_receipt_fields: entry
                         .apply_receipt
                         .as_ref()
-                        .map(json_object_keys)
+                        .map(|receipt| {
+                            let mut keys = json_object_keys(receipt);
+                            keys.retain(|key| key != "full_text");
+                            keys
+                        })
                         .unwrap_or_default(),
                     write_receipt_fields: entry
                         .write_receipt
@@ -3468,6 +4071,7 @@ reference: wiki:Attractor/Phase-2/Issue-{issue_number}\n"
             identity: "attractor.issue.43.issue-to-wiki-migration".to_owned(),
             title: "Old title".to_owned(),
             references: vec![],
+            full_text: None,
         };
         let receipt = receipt_for(Some(current), b"old typed page", b"old typed page");
 
@@ -3628,6 +4232,7 @@ reference: wiki:Attractor/Phase-2/Issue-{issue_number}\n"
             identity: "attractor.issue.43.issue-to-wiki-migration".to_owned(),
             title: "Old title".to_owned(),
             references: vec![],
+            full_text: None,
         };
         let receipt = receipt_for(Some(current), b"outside original", b"outside original");
 
@@ -3741,7 +4346,7 @@ reference: wiki:Attractor/Phase-2/Issue-{issue_number}\n"
         let live = TestDir::new();
         let mut push = RecordingPush::default();
         let manifest_json = serde_json::to_vec(&full_text).unwrap();
-        let err = publish_issue_wiki_batch_manifest_json(
+        let summary_publisher_err = publish_issue_wiki_batch_manifest_json(
             live.path(),
             &manifest_json,
             &full_text.manifest_key,
@@ -3749,8 +4354,165 @@ reference: wiki:Attractor/Phase-2/Issue-{issue_number}\n"
             &mut push,
         )
         .unwrap_err();
-        assert!(matches!(err, IssueWikiPublishError::StaleProjection { .. }));
+        assert!(matches!(
+            summary_publisher_err,
+            IssueWikiPublishError::StaleProjection { .. }
+        ));
         assert_eq!(push.calls, 0);
+
+        let driver_staging = TestDir::new();
+        let driver_live = TestDir::new();
+        let driver_export = IssueWikiBatchExport {
+            issue_set_selector: "repo=gwild/attractor published_wiki_refs=1".to_owned(),
+            issues: vec![export.issues[0].clone()],
+        };
+        let driver_export_hash = issue_wiki_batch_export_hash(&driver_export);
+        let driver_prep = TestDir::new();
+        let driver_manifest =
+            materialize_issue_wiki_full_text_batch_manifest(driver_prep.path(), &driver_export)
+                .unwrap();
+        let driver_lease = issue_wiki_publish_lease(
+            "mel",
+            0,
+            "wiki-head-before-lease",
+            hash_bytes(b"phase2 roster"),
+            driver_manifest.manifest_key.clone(),
+        );
+        let no_lease_publish = publish_issue_wiki_full_text_batch_manifest_json_with_lease(
+            driver_live.path(),
+            &serde_json::to_vec(&driver_manifest).unwrap(),
+            &driver_manifest.manifest_key,
+            &hash_bytes(b"different roster"),
+            &driver_lease,
+            true,
+            &mut RecordingPush::default(),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            no_lease_publish,
+            IssueWikiPublishError::LeaseRosterMismatch { .. }
+        ));
+        let mut driver_push = RecordingPush::default();
+        let driver_guard = IssueWikiFullTextBatchDriverGuard {
+            expected_issue_export_hash: &driver_export_hash,
+            expected_issue_set_selector: "repo=gwild/attractor published_wiki_refs=1",
+            active_roster_hash: &driver_lease.roster_hash,
+            lease: &driver_lease,
+        };
+        let driver_receipt = run_issue_wiki_full_text_batch_driver(
+            driver_staging.path(),
+            driver_live.path(),
+            &driver_export,
+            &driver_guard,
+            true,
+            &mut driver_push,
+        )
+        .unwrap();
+        assert_eq!(
+            driver_receipt.manifest.projection_schema_id,
+            ISSUE_WIKI_FULL_TEXT_SCHEMA_ID_V0
+        );
+        assert_eq!(driver_receipt.status, IssueWikiBatchRunStatus::Published);
+        assert!(driver_receipt.publish_receipt.pushed);
+        assert_eq!(driver_push.calls, 1);
+
+        let full_text_lease = issue_wiki_publish_lease(
+            "mel",
+            1,
+            "wiki-head-before-lease",
+            hash_bytes(b"phase2 full text roster"),
+            full_text.manifest_key.clone(),
+        );
+        let published = publish_issue_wiki_full_text_batch_manifest_json_with_lease(
+            live.path(),
+            &manifest_json,
+            &full_text.manifest_key,
+            &full_text_lease.roster_hash,
+            &full_text_lease,
+            true,
+            &mut push,
+        )
+        .unwrap();
+        let basis = issue_wiki_full_text_count_basis(
+            "wiki-head-after-lease",
+            &full_text.issue_set_selector,
+        );
+        let report = report_issue_wiki_full_text_batch_after_lease(
+            live.path(),
+            "phase2-batch-001",
+            "lane=mel",
+            &full_text,
+            &published,
+            &basis,
+            "wiki-head-after-lease",
+        )
+        .unwrap();
+
+        assert!(published.pushed);
+        assert_eq!(push.calls, 1);
+        assert_eq!(report.written, 302);
+        assert_eq!(report.noop, 0);
+        assert_eq!(report.refused, 0);
+        assert_eq!(report.remaining_text, 0);
+        let value = serde_json::to_value(&report).unwrap();
+        let decoded = serde_json::from_value::<IssueWikiFullTextBatchReportReceipt>(value).unwrap();
+        assert_eq!(decoded.report_key, report.report_key);
+
+        let first_page = live.path().join("Attractor/Phase-2/Issue-1.md");
+        let summary_only =
+            render_issue_wiki_page(summary.entries[0].apply_receipt.as_ref().unwrap());
+        fs::write(&first_page, summary_only).unwrap();
+        let readback_report = report_issue_wiki_full_text_batch_after_lease(
+            live.path(),
+            "phase2-batch-001",
+            "lane=mel",
+            &full_text,
+            &published,
+            &basis,
+            "wiki-head-after-lease",
+        )
+        .unwrap();
+        assert_eq!(
+            readback_report.remaining_text, 1,
+            "projection evidence must not decrement remaining_text without rendered marker"
+        );
+        let stale_payload =
+            render_issue_wiki_page(full_text.entries[0].apply_receipt.as_ref().unwrap()).replace(
+                "Full body text for phase 2 issue 1",
+                "Stale body text for phase 2 issue 1",
+            );
+        fs::write(&first_page, stale_payload).unwrap();
+        let stale_report = report_issue_wiki_full_text_batch_after_lease(
+            live.path(),
+            "phase2-batch-001",
+            "lane=mel",
+            &full_text,
+            &published,
+            &basis,
+            "wiki-head-after-lease",
+        )
+        .unwrap();
+        assert_eq!(
+            stale_report.remaining_text, 1,
+            "rendered marker with stale payload must not decrement remaining_text"
+        );
+
+        let wrong_basis =
+            issue_wiki_full_text_count_basis("different-wiki-head", &full_text.issue_set_selector);
+        let err = report_issue_wiki_full_text_batch_after_lease(
+            live.path(),
+            "phase2-batch-001",
+            "lane=mel",
+            &full_text,
+            &published,
+            &wrong_basis,
+            "wiki-head-after-lease",
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            IssueWikiFullTextBatchReportError::NonComparableBasis { .. }
+        ));
     }
 
     #[test]
