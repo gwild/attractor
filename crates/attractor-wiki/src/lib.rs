@@ -29,6 +29,9 @@ pub const ISSUE_WIKI_PUBLISH_RECEIPT_SCHEMA_ID_V0: &str = "attractor.issue_wiki.
 /// Stable schema id for issue-wiki batch run receipts.
 pub const ISSUE_WIKI_BATCH_RUN_RECEIPT_SCHEMA_ID_V0: &str =
     "attractor.issue_wiki.batch_run_receipt.v0";
+/// Stable schema id for deterministic parallel-prep lane receipts.
+pub const ISSUE_WIKI_PARALLEL_PREP_RECEIPT_SCHEMA_ID_V0: &str =
+    "attractor.issue_wiki.parallel_prep_receipt.v0";
 
 /// Materialized local write action.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -282,6 +285,52 @@ pub struct IssueWikiBatchRunReceipt {
     pub run_key: ContentHashHex,
 }
 
+/// Deterministic lane claim for parallel issue-wiki preparation.
+///
+/// This is intentionally a prep-only claim. It prevents two operators from
+/// freezing overlapping issue selectors; it does not grant permission to push
+/// concurrently to the single wiki git ref.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueWikiParallelLaneClaim {
+    /// Stable ordered roster name chosen by the operator/coordinator.
+    pub roster_id: String,
+    /// Digest of the immutable ordered roster used for every lane.
+    pub roster_digest: ContentHashHex,
+    /// Zero-based lane this operator owns.
+    pub lane_index: u64,
+    /// Total number of disjoint lanes in the roster.
+    pub lane_count: u64,
+    /// Human-readable owner for audit/status output.
+    pub owner: String,
+}
+
+/// Durable receipt emitted after preparing one deterministic parallel lane.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct IssueWikiParallelPrepReceipt {
+    /// Schema id this prep receipt used.
+    pub schema_id: String,
+    /// Claim used to partition the caller-owned export.
+    pub claim: IssueWikiParallelLaneClaim,
+    /// Hash of the full unpartitioned export.
+    pub source_issue_export_hash: ContentHashHex,
+    /// Selector of the full unpartitioned export.
+    pub source_issue_set_selector: String,
+    /// Hash of the lane-specific export.
+    pub lane_issue_export_hash: ContentHashHex,
+    /// Selector of the lane-specific export.
+    pub lane_issue_set_selector: String,
+    /// Issue numbers selected into this lane.
+    pub selected_issue_numbers: Vec<u64>,
+    /// Count of issues selected into this lane, for concise batch reporting.
+    pub selected_issue_count: u64,
+    /// Frozen manifest prepared from only this lane's issues.
+    pub manifest: IssueWikiBatchManifest,
+    /// Manifest key prepared from this lane.
+    pub manifest_key: ContentHashHex,
+    /// Deterministic key for idempotent prep receipt replay.
+    pub prep_key: ContentHashHex,
+}
+
 impl<'de> Deserialize<'de> for IssueWikiBatchManifest {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -335,6 +384,35 @@ impl<'de> Deserialize<'de> for IssueWikiBatchRunReceipt {
     }
 }
 
+impl<'de> Deserialize<'de> for IssueWikiParallelPrepReceipt {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let receipt = IssueWikiParallelPrepReceiptWire::deserialize(deserializer)?;
+        let receipt = Self {
+            schema_id: receipt.schema_id,
+            claim: receipt.claim,
+            source_issue_export_hash: receipt.source_issue_export_hash,
+            source_issue_set_selector: receipt.source_issue_set_selector,
+            lane_issue_export_hash: receipt.lane_issue_export_hash,
+            lane_issue_set_selector: receipt.lane_issue_set_selector,
+            selected_issue_numbers: receipt.selected_issue_numbers,
+            selected_issue_count: receipt.selected_issue_count,
+            manifest: receipt.manifest,
+            manifest_key: receipt.manifest_key,
+            prep_key: receipt.prep_key,
+        };
+        receipt
+            .validate_structural_invariants()
+            .map_err(serde::de::Error::custom)?;
+        receipt
+            .validate_prep_key()
+            .map_err(serde::de::Error::custom)?;
+        Ok(receipt)
+    }
+}
+
 #[derive(Deserialize)]
 struct IssueWikiBatchManifestWire {
     schema_id: String,
@@ -358,6 +436,21 @@ struct IssueWikiBatchRunReceiptWire {
     publish_key: ContentHashHex,
     status: IssueWikiBatchRunStatus,
     run_key: ContentHashHex,
+}
+
+#[derive(Deserialize)]
+struct IssueWikiParallelPrepReceiptWire {
+    schema_id: String,
+    claim: IssueWikiParallelLaneClaim,
+    source_issue_export_hash: ContentHashHex,
+    source_issue_set_selector: String,
+    lane_issue_export_hash: ContentHashHex,
+    lane_issue_set_selector: String,
+    selected_issue_numbers: Vec<u64>,
+    selected_issue_count: u64,
+    manifest: IssueWikiBatchManifest,
+    manifest_key: ContentHashHex,
+    prep_key: ContentHashHex,
 }
 
 impl<'de> Deserialize<'de> for IssueWikiWriteReceipt {
@@ -712,6 +805,61 @@ impl IssueWikiBatchRunReceipt {
             if &publish.pre_publish_snapshot != expected_pre {
                 return Err(format!(
                     "issue_wiki batch_run_publish_pre_snapshot_mismatch index={index}"
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+impl IssueWikiParallelPrepReceipt {
+    fn validate_prep_key(&self) -> Result<(), String> {
+        let expected = issue_wiki_parallel_prep_key(self);
+        if self.prep_key == expected {
+            Ok(())
+        } else {
+            Err(format!(
+                "issue_wiki parallel_prep_key_mismatch expected={} actual={}",
+                expected.as_str(),
+                self.prep_key.as_str()
+            ))
+        }
+    }
+
+    fn validate_structural_invariants(&self) -> Result<(), String> {
+        if self.schema_id != ISSUE_WIKI_PARALLEL_PREP_RECEIPT_SCHEMA_ID_V0 {
+            return Err(format!(
+                "issue_wiki parallel_prep_schema_mismatch expected={} actual={}",
+                ISSUE_WIKI_PARALLEL_PREP_RECEIPT_SCHEMA_ID_V0, self.schema_id
+            ));
+        }
+        self.claim.validate().map_err(|err| err.to_string())?;
+        if self.manifest_key != self.manifest.manifest_key {
+            return Err("issue_wiki parallel_prep_manifest_key_mismatch".to_owned());
+        }
+        if self.lane_issue_export_hash != self.manifest.issue_export_hash {
+            return Err("issue_wiki parallel_prep_lane_export_hash_mismatch".to_owned());
+        }
+        if self.lane_issue_set_selector != self.manifest.issue_set_selector {
+            return Err("issue_wiki parallel_prep_lane_selector_mismatch".to_owned());
+        }
+        let manifest_issue_numbers = self
+            .manifest
+            .entries
+            .iter()
+            .map(|entry| entry.issue_number)
+            .collect::<Vec<_>>();
+        if self.selected_issue_numbers != manifest_issue_numbers {
+            return Err("issue_wiki parallel_prep_selected_manifest_issue_mismatch".to_owned());
+        }
+        if self.selected_issue_count != self.selected_issue_numbers.len() as u64 {
+            return Err("issue_wiki parallel_prep_selected_count_mismatch".to_owned());
+        }
+        for issue_number in &self.selected_issue_numbers {
+            if issue_number % self.claim.lane_count != self.claim.lane_index {
+                return Err(format!(
+                    "issue_wiki parallel_prep_issue_outside_lane issue_number={} lane_index={} lane_count={}",
+                    issue_number, self.claim.lane_index, self.claim.lane_count
                 ));
             }
         }
@@ -1315,6 +1463,25 @@ pub enum IssueWikiBatchRunError {
     Publish(IssueWikiPublishError),
 }
 
+/// Parallel-prep errors. These happen before live publish and before any
+/// serialized wiki-push lane is entered.
+#[derive(Debug)]
+pub enum IssueWikiParallelPrepError {
+    /// The claim's lane count was zero.
+    ZeroLaneCount,
+    /// The lane index must be lower than lane_count.
+    LaneIndexOutOfRange { lane_index: u64, lane_count: u64 },
+    /// Empty roster/owner strings are not durable audit labels.
+    EmptyClaimField { field: &'static str },
+    /// A prep receipt was frozen under a different roster than the active run.
+    RosterMismatch {
+        expected_roster_digest: ContentHashHex,
+        actual_roster_digest: ContentHashHex,
+    },
+    /// Manifest construction failed for this lane.
+    Manifest(IssueWikiWriteError),
+}
+
 impl fmt::Display for IssueWikiBatchRunError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -1355,6 +1522,57 @@ impl fmt::Display for IssueWikiBatchRunError {
 
 impl std::error::Error for IssueWikiBatchRunError {}
 
+impl fmt::Display for IssueWikiParallelPrepError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ZeroLaneCount => write!(f, "issue_wiki parallel_prep_zero_lane_count"),
+            Self::LaneIndexOutOfRange {
+                lane_index,
+                lane_count,
+            } => write!(
+                f,
+                "issue_wiki parallel_prep_lane_index_out_of_range lane_index={lane_index} lane_count={lane_count}"
+            ),
+            Self::EmptyClaimField { field } => {
+                write!(f, "issue_wiki parallel_prep_empty_claim_field field={field}")
+            }
+            Self::RosterMismatch {
+                expected_roster_digest,
+                actual_roster_digest,
+            } => write!(
+                f,
+                "issue_wiki parallel_prep_roster_mismatch expected={} actual={}",
+                expected_roster_digest.as_str(),
+                actual_roster_digest.as_str()
+            ),
+            Self::Manifest(err) => write!(f, "{err}"),
+        }
+    }
+}
+
+impl std::error::Error for IssueWikiParallelPrepError {}
+
+impl IssueWikiParallelLaneClaim {
+    fn validate(&self) -> Result<(), IssueWikiParallelPrepError> {
+        if self.roster_id.trim().is_empty() {
+            return Err(IssueWikiParallelPrepError::EmptyClaimField { field: "roster_id" });
+        }
+        if self.lane_count == 0 {
+            return Err(IssueWikiParallelPrepError::ZeroLaneCount);
+        }
+        if self.owner.trim().is_empty() {
+            return Err(IssueWikiParallelPrepError::EmptyClaimField { field: "owner" });
+        }
+        if self.lane_index >= self.lane_count {
+            return Err(IssueWikiParallelPrepError::LaneIndexOutOfRange {
+                lane_index: self.lane_index,
+                lane_count: self.lane_count,
+            });
+        }
+        Ok(())
+    }
+}
+
 fn reject_same_wiki_root(staging: &Path, live: &Path) -> Result<(), IssueWikiBatchRunError> {
     let staging = canonicalize_batch_root(staging)?;
     let live = canonicalize_batch_root(live)?;
@@ -1377,6 +1595,171 @@ fn canonicalize_batch_root(path: &Path) -> Result<PathBuf, IssueWikiBatchRunErro
 #[must_use]
 pub fn issue_wiki_batch_export_hash(export: &IssueWikiBatchExport) -> ContentHashHex {
     issue_wiki_export_hash(export)
+}
+
+/// Select one deterministic parallel-prep lane from a full caller-owned export.
+///
+/// Each issue belongs to exactly one lane by `issue_number % lane_count`. This
+/// gives operators a shared-state-free way to divide a backlog before manifest
+/// freeze. The returned export is still prep-only; live wiki pushes must remain
+/// serialized against the single wiki git ref.
+///
+/// # Errors
+/// Returns [`IssueWikiParallelPrepError`] if the lane claim is not a valid
+/// durable partition claim.
+pub fn partition_issue_wiki_batch_export_for_lane(
+    export: &IssueWikiBatchExport,
+    claim: &IssueWikiParallelLaneClaim,
+) -> Result<IssueWikiBatchExport, IssueWikiParallelPrepError> {
+    claim.validate()?;
+    let issues = export
+        .issues
+        .iter()
+        .filter(|issue| issue.source.issue_number % claim.lane_count == claim.lane_index)
+        .cloned()
+        .collect::<Vec<_>>();
+    Ok(IssueWikiBatchExport {
+        issue_set_selector: format!(
+            "{} lane={}/{} roster={} roster_digest={} owner={}",
+            export.issue_set_selector,
+            claim.lane_index,
+            claim.lane_count,
+            claim.roster_id,
+            claim.roster_digest.as_str(),
+            claim.owner
+        ),
+        issues,
+    })
+}
+
+/// Compute the immutable roster digest operators must share before partitioning.
+///
+/// The roster order defines each agent's lane index, so it must be frozen for
+/// the whole parallel run. If the roster changes, callers must start a new run
+/// with a new digest instead of mixing lanes from different rosters.
+#[must_use]
+pub fn issue_wiki_parallel_roster_digest(
+    roster_id: &str,
+    ordered_owners: &[String],
+) -> ContentHashHex {
+    let mut hasher = blake3::Hasher::new();
+    hash_part(&mut hasher, roster_id.as_bytes());
+    for owner in ordered_owners {
+        hash_part(&mut hasher, owner.as_bytes());
+    }
+    ContentHashHex::new(hasher.finalize().to_hex().to_string())
+        .expect("blake3 lowercase hex is always valid")
+}
+
+/// Build a lane claim from the same immutable ordered roster every operator uses.
+///
+/// Callers should construct claims through this helper instead of hand-assembling
+/// lane metadata. The ordered roster defines both the modulus and the owner at
+/// each index, and the resulting digest is what downstream receipts carry.
+///
+/// # Errors
+/// Returns [`IssueWikiParallelPrepError`] when the roster or requested lane is
+/// not a valid durable partition claim.
+pub fn issue_wiki_parallel_lane_claim(
+    roster_id: &str,
+    ordered_owners: &[String],
+    lane_index: u64,
+) -> Result<IssueWikiParallelLaneClaim, IssueWikiParallelPrepError> {
+    let lane_count = u64::try_from(ordered_owners.len())
+        .expect("usize always fits into u64 on supported targets");
+    let owner = if lane_count == 0 {
+        String::new()
+    } else if lane_index >= lane_count {
+        return Err(IssueWikiParallelPrepError::LaneIndexOutOfRange {
+            lane_index,
+            lane_count,
+        });
+    } else {
+        ordered_owners[lane_index as usize].clone()
+    };
+    let claim = IssueWikiParallelLaneClaim {
+        roster_id: roster_id.to_owned(),
+        roster_digest: issue_wiki_parallel_roster_digest(roster_id, ordered_owners),
+        lane_index,
+        lane_count,
+        owner,
+    };
+    claim.validate()?;
+    Ok(claim)
+}
+
+/// Validate that a prepared lane belongs to the active immutable roster.
+///
+/// This is the publish-lane guard for deterministic parallel prep: a batch
+/// frozen under a different roster or modulus must be refused instead of mixed
+/// with the active run, because two different moduli can claim the same issue.
+///
+/// # Errors
+/// Returns [`IssueWikiParallelPrepError`] when the active roster is invalid or
+/// the receipt's roster digest differs from the active run's digest.
+pub fn validate_issue_wiki_parallel_prep_roster(
+    receipt: &IssueWikiParallelPrepReceipt,
+    active_roster_id: &str,
+    active_ordered_owners: &[String],
+) -> Result<(), IssueWikiParallelPrepError> {
+    let expected_roster_digest =
+        issue_wiki_parallel_roster_digest(active_roster_id, active_ordered_owners);
+    let _expected_claim = issue_wiki_parallel_lane_claim(
+        active_roster_id,
+        active_ordered_owners,
+        receipt.claim.lane_index,
+    )?;
+    if receipt.claim.roster_digest != expected_roster_digest {
+        return Err(IssueWikiParallelPrepError::RosterMismatch {
+            expected_roster_digest,
+            actual_roster_digest: receipt.claim.roster_digest.clone(),
+        });
+    }
+    Ok(())
+}
+
+/// Prepare a claimed deterministic lane without entering the live publish path.
+///
+/// This is the parallelizable part of the issue-wiki fan-out: operators can
+/// partition, project, and materialize their disjoint lanes concurrently, then
+/// hand the resulting manifests to a single serialized wiki-push lane.
+///
+/// # Errors
+/// Returns [`IssueWikiParallelPrepError`] when the claim is invalid or when
+/// local manifest materialization fails.
+pub fn prepare_issue_wiki_parallel_lane_manifest(
+    staging_wiki_root: impl AsRef<Path>,
+    export: &IssueWikiBatchExport,
+    claim: &IssueWikiParallelLaneClaim,
+) -> Result<IssueWikiParallelPrepReceipt, IssueWikiParallelPrepError> {
+    let lane_export = partition_issue_wiki_batch_export_for_lane(export, claim)?;
+    let source_issue_export_hash = issue_wiki_batch_export_hash(export);
+    let lane_issue_export_hash = issue_wiki_batch_export_hash(&lane_export);
+    let selected_issue_numbers = lane_export
+        .issues
+        .iter()
+        .map(|issue| issue.source.issue_number)
+        .collect::<Vec<_>>();
+    let manifest = materialize_issue_wiki_batch_manifest(staging_wiki_root, &lane_export)
+        .map_err(IssueWikiParallelPrepError::Manifest)?;
+    let receipt = IssueWikiParallelPrepReceipt {
+        schema_id: ISSUE_WIKI_PARALLEL_PREP_RECEIPT_SCHEMA_ID_V0.to_owned(),
+        claim: claim.clone(),
+        source_issue_export_hash,
+        source_issue_set_selector: export.issue_set_selector.clone(),
+        lane_issue_export_hash,
+        lane_issue_set_selector: lane_export.issue_set_selector,
+        selected_issue_numbers,
+        selected_issue_count: manifest.entries.len() as u64,
+        manifest_key: manifest.manifest_key.clone(),
+        manifest,
+        prep_key: ContentHashHex::new("0".repeat(64))
+            .expect("zero placeholder is valid lowercase hex"),
+    };
+    Ok(IssueWikiParallelPrepReceipt {
+        prep_key: issue_wiki_parallel_prep_key(&receipt),
+        ..receipt
+    })
 }
 
 /// Run the issue-to-wiki orchestration driver for one caller-owned export.
@@ -2252,6 +2635,33 @@ fn issue_wiki_batch_run_key(receipt: &IssueWikiBatchRunReceipt) -> ContentHashHe
         .expect("blake3 lowercase hex is always valid")
 }
 
+fn issue_wiki_parallel_prep_key(receipt: &IssueWikiParallelPrepReceipt) -> ContentHashHex {
+    let mut hasher = blake3::Hasher::new();
+    hash_part(&mut hasher, receipt.schema_id.as_bytes());
+    hash_part(&mut hasher, receipt.claim.roster_id.as_bytes());
+    hash_part(&mut hasher, receipt.claim.roster_digest.as_str().as_bytes());
+    hash_part(&mut hasher, &receipt.claim.lane_index.to_le_bytes());
+    hash_part(&mut hasher, &receipt.claim.lane_count.to_le_bytes());
+    hash_part(&mut hasher, receipt.claim.owner.as_bytes());
+    hash_part(
+        &mut hasher,
+        receipt.source_issue_export_hash.as_str().as_bytes(),
+    );
+    hash_part(&mut hasher, receipt.source_issue_set_selector.as_bytes());
+    hash_part(
+        &mut hasher,
+        receipt.lane_issue_export_hash.as_str().as_bytes(),
+    );
+    hash_part(&mut hasher, receipt.lane_issue_set_selector.as_bytes());
+    for issue_number in &receipt.selected_issue_numbers {
+        hash_part(&mut hasher, &issue_number.to_le_bytes());
+    }
+    hash_part(&mut hasher, &receipt.selected_issue_count.to_le_bytes());
+    hash_part(&mut hasher, receipt.manifest_key.as_str().as_bytes());
+    ContentHashHex::new(hasher.finalize().to_hex().to_string())
+        .expect("blake3 lowercase hex is always valid")
+}
+
 fn issue_wiki_manifest_tree_hash(
     wiki_root: &Path,
     manifest: &IssueWikiBatchManifest,
@@ -2495,10 +2905,41 @@ mod tests {
         }
     }
 
+    fn issue_export_many(issue_numbers: &[u64]) -> IssueWikiBatchExport {
+        let issues = issue_numbers
+            .iter()
+            .map(|issue_number| {
+                let source_bytes = issue_source_bytes_for(*issue_number);
+                let source_hash = hash_bytes(source_bytes.as_bytes());
+                IssueWikiBatchIssue {
+                    source: IssueWikiSource {
+                        repo: "gwild/attractor".to_owned(),
+                        issue_number: *issue_number,
+                        source_ref: format!("github:gwild/attractor#{issue_number}"),
+                        source_hash,
+                    },
+                    source_bytes: source_bytes.into_bytes(),
+                }
+            })
+            .collect();
+        IssueWikiBatchExport {
+            issue_set_selector: "repo=gwild/attractor state=open".to_owned(),
+            issues,
+        }
+    }
+
     fn issue_source_bytes() -> &'static [u8] {
         b"identity: attractor.issue.52.batch-manifest\n\
 title: Batch issue wiki migration manifest\n\
 reference: wiki:Attractor/Batch-Migration-Manifest\n"
+    }
+
+    fn issue_source_bytes_for(issue_number: u64) -> String {
+        format!(
+            "identity: attractor.issue.{issue_number}.parallel-lane\n\
+title: Parallel lane issue {issue_number}\n\
+reference: wiki:Attractor/Parallel-Lane-{issue_number}\n"
+        )
     }
 
     #[derive(Default)]
@@ -2579,6 +3020,20 @@ reference: wiki:Attractor/Batch-Migration-Manifest\n"
         };
         manifest.manifest_key = issue_wiki_batch_manifest_key(&manifest);
         manifest
+    }
+
+    fn parallel_claim(
+        roster_id: &str,
+        lane_index: u64,
+        lane_count: u64,
+        owner: &str,
+    ) -> IssueWikiParallelLaneClaim {
+        let owners = (0..lane_count)
+            .map(|index| format!("agent-{index}"))
+            .collect::<Vec<_>>();
+        let mut owners = owners;
+        owners[lane_index as usize] = owner.to_owned();
+        issue_wiki_parallel_lane_claim(roster_id, &owners, lane_index).unwrap()
     }
 
     #[test]
@@ -2812,6 +3267,141 @@ reference: wiki:Attractor/Batch-Migration-Manifest\n"
         assert!(page.contains("# Batch issue wiki migration manifest"));
         assert!(!json.contains("identity: attractor.issue.52.batch-manifest"));
         assert!(!json.contains("reference: wiki:Attractor/Batch-Migration-Manifest"));
+    }
+
+    #[test]
+    fn deterministic_parallel_lanes_partition_without_overlap() {
+        let export = issue_export_many(&[100, 101, 102, 103, 104, 105, 106]);
+        let mut selected = Vec::new();
+
+        for lane_index in 0..3 {
+            let claim = parallel_claim("run-1", lane_index, 3, &format!("agent-{lane_index}"));
+            let lane = partition_issue_wiki_batch_export_for_lane(&export, &claim).unwrap();
+            assert!(
+                lane.issue_set_selector
+                    .contains(&format!("roster_digest={}", claim.roster_digest.as_str())),
+                "lane selector must carry the frozen roster digest"
+            );
+            for issue in lane.issues {
+                assert_eq!(issue.source.issue_number % 3, lane_index);
+                selected.push(issue.source.issue_number);
+            }
+        }
+
+        selected.sort_unstable();
+        assert_eq!(selected, vec![100, 101, 102, 103, 104, 105, 106]);
+    }
+
+    #[test]
+    fn deterministic_parallel_lane_refuses_invalid_claims() {
+        let export = issue_export_many(&[100]);
+        let mut zero = parallel_claim("run-1", 0, 1, "agent-0");
+        zero.lane_count = 0;
+        let err = partition_issue_wiki_batch_export_for_lane(&export, &zero).unwrap_err();
+        assert!(matches!(err, IssueWikiParallelPrepError::ZeroLaneCount));
+
+        let out_of_range = IssueWikiParallelLaneClaim {
+            roster_id: "run-1".to_owned(),
+            roster_digest: issue_wiki_parallel_roster_digest(
+                "run-1",
+                &["agent-0".to_owned(), "agent-1".to_owned()],
+            ),
+            lane_index: 2,
+            lane_count: 2,
+            owner: "agent-2".to_owned(),
+        };
+        let err = partition_issue_wiki_batch_export_for_lane(&export, &out_of_range).unwrap_err();
+        assert!(matches!(
+            err,
+            IssueWikiParallelPrepError::LaneIndexOutOfRange { .. }
+        ));
+
+        let mut empty_owner = parallel_claim("run-1", 0, 2, "agent-0");
+        empty_owner.owner = String::new();
+        let err = partition_issue_wiki_batch_export_for_lane(&export, &empty_owner).unwrap_err();
+        assert!(matches!(
+            err,
+            IssueWikiParallelPrepError::EmptyClaimField { field: "owner" }
+        ));
+
+        let err = issue_wiki_parallel_lane_claim("run-1", &[], 0).unwrap_err();
+        assert!(matches!(err, IssueWikiParallelPrepError::ZeroLaneCount));
+    }
+
+    #[test]
+    fn parallel_lane_prep_emits_manifest_without_publish_transport() {
+        let staging = TestDir::new();
+        let export = issue_export_many(&[100, 101, 102, 103, 104]);
+        let claim = parallel_claim("run-1", 1, 2, "agent-1");
+
+        let receipt =
+            prepare_issue_wiki_parallel_lane_manifest(staging.path(), &export, &claim).unwrap();
+
+        assert_eq!(
+            receipt.schema_id,
+            ISSUE_WIKI_PARALLEL_PREP_RECEIPT_SCHEMA_ID_V0
+        );
+        assert_eq!(receipt.claim, claim);
+        assert_eq!(
+            receipt.source_issue_export_hash,
+            issue_wiki_batch_export_hash(&export)
+        );
+        assert_eq!(receipt.selected_issue_numbers, vec![101, 103]);
+        assert_eq!(receipt.selected_issue_count, 2);
+        assert_eq!(receipt.manifest.entries.len(), 2);
+        assert_eq!(receipt.manifest_key, receipt.manifest.manifest_key);
+        assert_eq!(receipt.prep_key, issue_wiki_parallel_prep_key(&receipt));
+        assert_eq!(
+            receipt.manifest.issue_set_selector, receipt.lane_issue_set_selector,
+            "manifest must be frozen from the lane-specific selector"
+        );
+    }
+
+    #[test]
+    fn parallel_prep_roster_guard_rejects_mixed_modulus() {
+        let staging = TestDir::new();
+        let export = issue_export_many(&[100, 101, 102, 103, 104]);
+        let claim = parallel_claim("run-1", 1, 2, "agent-1");
+        let receipt =
+            prepare_issue_wiki_parallel_lane_manifest(staging.path(), &export, &claim).unwrap();
+
+        validate_issue_wiki_parallel_prep_roster(
+            &receipt,
+            "run-1",
+            &["agent-0".to_owned(), "agent-1".to_owned()],
+        )
+        .unwrap();
+
+        let err = validate_issue_wiki_parallel_prep_roster(
+            &receipt,
+            "run-1",
+            &[
+                "agent-0".to_owned(),
+                "agent-1".to_owned(),
+                "agent-2".to_owned(),
+            ],
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            IssueWikiParallelPrepError::RosterMismatch { .. }
+        ));
+    }
+
+    #[test]
+    fn parallel_prep_receipt_rejects_recomputed_cross_lane_tamper() {
+        let staging = TestDir::new();
+        let export = issue_export_many(&[100, 101, 102, 103, 104]);
+        let claim = parallel_claim("run-1", 1, 2, "agent-1");
+        let mut receipt =
+            prepare_issue_wiki_parallel_lane_manifest(staging.path(), &export, &claim).unwrap();
+        receipt.claim.lane_index = 0;
+        receipt.prep_key = issue_wiki_parallel_prep_key(&receipt);
+        let value = serde_json::to_value(receipt).unwrap();
+
+        let err = serde_json::from_value::<IssueWikiParallelPrepReceipt>(value).unwrap_err();
+
+        assert!(err.to_string().contains("parallel_prep_issue_outside_lane"));
     }
 
     #[test]
