@@ -631,6 +631,7 @@ impl IssueWikiBatchRunReceipt {
         if self.publish_receipt.projection_schema_digest != self.manifest.projection_schema_digest {
             return Err("issue_wiki batch_run_projection_digest_mismatch".to_owned());
         }
+        self.validate_publish_entries_match_manifest()?;
         let expected_status = if self.publish_receipt.pushed {
             IssueWikiBatchRunStatus::Published
         } else {
@@ -642,6 +643,59 @@ impl IssueWikiBatchRunReceipt {
                 expected_status.as_str(),
                 self.status.as_str()
             ));
+        }
+        Ok(())
+    }
+
+    fn validate_publish_entries_match_manifest(&self) -> Result<(), String> {
+        let expected_writes = self
+            .manifest
+            .entries
+            .iter()
+            .filter_map(|entry| entry.write_receipt.as_ref())
+            .collect::<Vec<_>>();
+        if self.publish_receipt.entries.len() != expected_writes.len() {
+            return Err(format!(
+                "issue_wiki batch_run_publish_entry_count_mismatch expected={} actual={}",
+                expected_writes.len(),
+                self.publish_receipt.entries.len()
+            ));
+        }
+        for (index, (publish, write)) in self
+            .publish_receipt
+            .entries
+            .iter()
+            .zip(expected_writes.iter())
+            .enumerate()
+        {
+            if publish.page_path != write.page_path {
+                return Err(format!(
+                    "issue_wiki batch_run_publish_page_mismatch index={} publish={} write={}",
+                    index, publish.page_path, write.page_path
+                ));
+            }
+            if publish.write_key != write.write_key {
+                return Err(format!(
+                    "issue_wiki batch_run_publish_write_key_mismatch index={} publish={} write={}",
+                    index,
+                    publish.write_key.as_str(),
+                    write.write_key.as_str()
+                ));
+            }
+            if publish.post_publish_snapshot != write.post_write_snapshot {
+                return Err(format!(
+                    "issue_wiki batch_run_publish_post_snapshot_mismatch index={index}"
+                ));
+            }
+            let expected_pre = match publish.action {
+                IssueWikiPublishAction::Published => &write.pre_write_snapshot,
+                IssueWikiPublishAction::Noop => &write.post_write_snapshot,
+            };
+            if &publish.pre_publish_snapshot != expected_pre {
+                return Err(format!(
+                    "issue_wiki batch_run_publish_pre_snapshot_mismatch index={index}"
+                ));
+            }
         }
         Ok(())
     }
@@ -3338,5 +3392,71 @@ reference: wiki:Attractor/Batch-Migration-Manifest\n"
         let err = serde_json::from_value::<IssueWikiBatchRunReceipt>(value).unwrap_err();
 
         assert!(err.to_string().contains("batch_run_selector_mismatch"));
+    }
+
+    #[test]
+    fn batch_run_receipt_rejects_recomputed_publish_entry_swap() {
+        let staging = TestDir::new();
+        let live = TestDir::new();
+        let export = issue_export("repo=gwild/attractor issue=52", 52, issue_source_bytes());
+        let export_hash = issue_wiki_batch_export_hash(&export);
+        let mut push = RecordingPush::default();
+        let mut receipt = run_issue_wiki_batch_driver(
+            staging.path(),
+            live.path(),
+            &export,
+            &export_hash,
+            "repo=gwild/attractor issue=52",
+            true,
+            &mut push,
+        )
+        .unwrap();
+        let publish_entry = &mut receipt.publish_receipt.entries[0];
+        publish_entry.page_path = "Attractor/Forged".to_owned();
+        publish_entry.write_key = hash_bytes(b"forged write key");
+        publish_entry.pre_publish_snapshot =
+            IssueWikiPageSnapshot::from_page_bytes("Attractor/Forged", b"before");
+        publish_entry.post_publish_snapshot =
+            IssueWikiPageSnapshot::from_page_bytes("Attractor/Forged", b"after");
+        receipt.publish_receipt.publish_key = issue_wiki_publish_key(&receipt.publish_receipt);
+        receipt.publish_key = receipt.publish_receipt.publish_key.clone();
+        receipt.run_key = issue_wiki_batch_run_key(&receipt);
+        let value = serde_json::to_value(receipt).unwrap();
+
+        let err = serde_json::from_value::<IssueWikiBatchRunReceipt>(value).unwrap_err();
+
+        assert!(err.to_string().contains("batch_run_publish_page_mismatch"));
+    }
+
+    #[test]
+    fn batch_run_receipt_rejects_recomputed_publish_snapshot_tamper() {
+        let staging = TestDir::new();
+        let live = TestDir::new();
+        let export = issue_export("repo=gwild/attractor issue=52", 52, issue_source_bytes());
+        let export_hash = issue_wiki_batch_export_hash(&export);
+        let mut push = RecordingPush::default();
+        let mut receipt = run_issue_wiki_batch_driver(
+            staging.path(),
+            live.path(),
+            &export,
+            &export_hash,
+            "repo=gwild/attractor issue=52",
+            true,
+            &mut push,
+        )
+        .unwrap();
+        let page_path = receipt.publish_receipt.entries[0].page_path.clone();
+        receipt.publish_receipt.entries[0].post_publish_snapshot =
+            IssueWikiPageSnapshot::from_page_bytes(page_path, b"forged post bytes");
+        receipt.publish_receipt.publish_key = issue_wiki_publish_key(&receipt.publish_receipt);
+        receipt.publish_key = receipt.publish_receipt.publish_key.clone();
+        receipt.run_key = issue_wiki_batch_run_key(&receipt);
+        let value = serde_json::to_value(receipt).unwrap();
+
+        let err = serde_json::from_value::<IssueWikiBatchRunReceipt>(value).unwrap_err();
+
+        assert!(err
+            .to_string()
+            .contains("batch_run_publish_post_snapshot_mismatch"));
     }
 }
