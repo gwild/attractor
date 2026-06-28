@@ -8,7 +8,7 @@ edition = "2021"
 # issue-wiki projector before local materialization.
 rust-version = "1.96"
 license = "MIT OR Apache-2.0"
-description = "Issue-wiki write and publish boundary: materialize validated receipts and publish frozen manifests with durable receipts."
+description = "Issue-wiki write, publish, and batch-driver boundary with frozen manifests and durable receipts."
 repository = "https://github.com/gwild/attractor"
 
 [dependencies]
