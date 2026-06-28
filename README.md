@@ -61,8 +61,9 @@ Two MSRV legs, attested separately (see below):
   acyclic relation graph, tamper-evident provenance chain (guarantees 1–3
   above).
 - **`attractor-projector`** — WS-3 markdown projection boundary (guarantee 4).
-- **`attractor-wiki`** — issue-wiki local materialization, batch manifest, and
-  gated publish boundary; it consumes the projector, so it follows this leg.
+- **`attractor-wiki`** — issue-wiki local materialization, batch manifest,
+  gated publish boundary, and explicit-hash batch driver; it consumes the
+  projector, so it follows this leg.
 
 ## Build, test, attest
 
