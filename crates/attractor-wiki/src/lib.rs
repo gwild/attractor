@@ -26,6 +26,9 @@ pub const ISSUE_WIKI_WRITE_RECEIPT_SCHEMA_ID_V0: &str = "attractor.issue_wiki.wr
 pub const ISSUE_WIKI_BATCH_MANIFEST_SCHEMA_ID_V0: &str = "attractor.issue_wiki.batch_manifest.v0";
 /// Stable schema id for issue-wiki publish receipts.
 pub const ISSUE_WIKI_PUBLISH_RECEIPT_SCHEMA_ID_V0: &str = "attractor.issue_wiki.publish_receipt.v0";
+/// Stable schema id for issue-wiki batch driver receipts.
+pub const ISSUE_WIKI_BATCH_DRIVER_RECEIPT_SCHEMA_ID_V0: &str =
+    "attractor.issue_wiki.batch_driver_receipt.v0";
 
 /// Materialized local write action.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -233,6 +236,30 @@ pub struct IssueWikiPublishReceipt {
     pub publish_key: ContentHashHex,
 }
 
+/// Durable receipt for one orchestrated issue-wiki batch driver run.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct IssueWikiBatchDriverReceipt {
+    /// Schema id this driver receipt used.
+    pub schema_id: String,
+    /// Hash of the exact caller-owned issue export bytes and selector.
+    pub issue_export_hash: ContentHashHex,
+    /// Stable selector carried by the source export.
+    pub issue_set_selector: String,
+    /// Projection schema digest carried by the frozen manifest.
+    pub projection_schema_digest: ContentHashHex,
+    /// Frozen manifest key handed to the publish boundary.
+    pub manifest_key: ContentHashHex,
+    /// Full frozen manifest retained as the handoff artifact.
+    pub manifest: IssueWikiBatchManifest,
+    /// Whether this driver entered the publish boundary.
+    pub publish_requested: bool,
+    /// Publish receipt emitted by the live boundary, when requested.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publish_receipt: Option<IssueWikiPublishReceipt>,
+    /// Deterministic key for this orchestration receipt.
+    pub driver_key: ContentHashHex,
+}
+
 impl<'de> Deserialize<'de> for IssueWikiBatchManifest {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -349,6 +376,47 @@ struct IssueWikiPublishReceiptWire {
     entries: Vec<IssueWikiPublishReceiptEntry>,
     pushed: bool,
     publish_key: ContentHashHex,
+}
+
+impl<'de> Deserialize<'de> for IssueWikiBatchDriverReceipt {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let receipt = IssueWikiBatchDriverReceiptWire::deserialize(deserializer)?;
+        let receipt = Self {
+            schema_id: receipt.schema_id,
+            issue_export_hash: receipt.issue_export_hash,
+            issue_set_selector: receipt.issue_set_selector,
+            projection_schema_digest: receipt.projection_schema_digest,
+            manifest_key: receipt.manifest_key,
+            manifest: receipt.manifest,
+            publish_requested: receipt.publish_requested,
+            publish_receipt: receipt.publish_receipt,
+            driver_key: receipt.driver_key,
+        };
+        receipt
+            .validate_driver_key()
+            .map_err(serde::de::Error::custom)?;
+        receipt
+            .validate_structural_invariants()
+            .map_err(serde::de::Error::custom)?;
+        Ok(receipt)
+    }
+}
+
+#[derive(Deserialize)]
+struct IssueWikiBatchDriverReceiptWire {
+    schema_id: String,
+    issue_export_hash: ContentHashHex,
+    issue_set_selector: String,
+    projection_schema_digest: ContentHashHex,
+    manifest_key: ContentHashHex,
+    manifest: IssueWikiBatchManifest,
+    publish_requested: bool,
+    #[serde(default)]
+    publish_receipt: Option<IssueWikiPublishReceipt>,
+    driver_key: ContentHashHex,
 }
 
 impl IssueWikiWriteReceipt {
@@ -498,6 +566,88 @@ impl IssueWikiPublishReceipt {
                 "issue_wiki publish_pushed_action_mismatch pushed={} any_published={}",
                 self.pushed, any_published
             ));
+        }
+        Ok(())
+    }
+}
+
+impl IssueWikiBatchDriverReceipt {
+    fn validate_driver_key(&self) -> Result<(), String> {
+        let expected = issue_wiki_batch_driver_key(self);
+        if self.driver_key == expected {
+            Ok(())
+        } else {
+            Err(format!(
+                "issue_wiki batch_driver_key_mismatch expected={} actual={}",
+                expected.as_str(),
+                self.driver_key.as_str()
+            ))
+        }
+    }
+
+    fn validate_structural_invariants(&self) -> Result<(), String> {
+        if self.schema_id != ISSUE_WIKI_BATCH_DRIVER_RECEIPT_SCHEMA_ID_V0 {
+            return Err(format!(
+                "issue_wiki batch_driver_schema_mismatch expected={} actual={}",
+                ISSUE_WIKI_BATCH_DRIVER_RECEIPT_SCHEMA_ID_V0, self.schema_id
+            ));
+        }
+        if self.issue_export_hash != self.manifest.issue_export_hash {
+            return Err(format!(
+                "issue_wiki batch_driver_export_hash_mismatch receipt={} manifest={}",
+                self.issue_export_hash.as_str(),
+                self.manifest.issue_export_hash.as_str()
+            ));
+        }
+        if self.issue_set_selector != self.manifest.issue_set_selector {
+            return Err(format!(
+                "issue_wiki batch_driver_selector_mismatch receipt={} manifest={}",
+                self.issue_set_selector, self.manifest.issue_set_selector
+            ));
+        }
+        if self.projection_schema_digest != self.manifest.projection_schema_digest {
+            return Err(format!(
+                "issue_wiki batch_driver_projection_digest_mismatch receipt={} manifest={}",
+                self.projection_schema_digest.as_str(),
+                self.manifest.projection_schema_digest.as_str()
+            ));
+        }
+        if self.manifest_key != self.manifest.manifest_key {
+            return Err(format!(
+                "issue_wiki batch_driver_manifest_key_mismatch receipt={} manifest={}",
+                self.manifest_key.as_str(),
+                self.manifest.manifest_key.as_str()
+            ));
+        }
+        match (self.publish_requested, &self.publish_receipt) {
+            (false, None) => {}
+            (false, Some(_)) => {
+                return Err("issue_wiki batch_driver_unrequested_publish_receipt".to_owned());
+            }
+            (true, None) => {
+                return Err("issue_wiki batch_driver_missing_publish_receipt".to_owned());
+            }
+            (true, Some(publish)) => {
+                if publish.manifest_key != self.manifest_key {
+                    return Err(format!(
+                        "issue_wiki batch_driver_publish_manifest_mismatch driver={} publish={}",
+                        self.manifest_key.as_str(),
+                        publish.manifest_key.as_str()
+                    ));
+                }
+                if publish.projection_schema_digest != self.projection_schema_digest {
+                    return Err(format!(
+                        "issue_wiki batch_driver_publish_projection_mismatch driver={} publish={}",
+                        self.projection_schema_digest.as_str(),
+                        publish.projection_schema_digest.as_str()
+                    ));
+                }
+                let expected = manifest_publish_bindings(&self.manifest);
+                let actual = publish_receipt_bindings(publish);
+                if actual != expected {
+                    return Err("issue_wiki batch_driver_publish_entries_mismatch".to_owned());
+                }
+            }
         }
         Ok(())
     }
@@ -1068,6 +1218,139 @@ impl From<IssueWikiWriteError> for IssueWikiPublishError {
             },
         }
     }
+}
+
+/// Batch-driver errors. Publish refusals happen before transport entry unless
+/// the wrapped publish boundary reports [`IssueWikiPublishError::Push`].
+#[derive(Debug)]
+pub enum IssueWikiBatchDriverError {
+    /// The manifest staging/materialization step failed.
+    Materialize { source: IssueWikiWriteError },
+    /// Publish mode requires separate staging and live publish trees.
+    SameStagingAndPublishRoot { path: PathBuf },
+    /// The frozen manifest could not be serialized for the publish boundary.
+    SerializeManifest { reason: String },
+    /// Live publish was requested for a manifest with refused rows.
+    RefusedManifestEntries {
+        stale: usize,
+        malformed: usize,
+        conflict: usize,
+    },
+    /// The publish boundary refused or failed.
+    Publish { source: IssueWikiPublishError },
+}
+
+impl fmt::Display for IssueWikiBatchDriverError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Materialize { source } => write!(f, "issue_wiki batch_driver_materialize {source}"),
+            Self::SameStagingAndPublishRoot { path } => write!(
+                f,
+                "issue_wiki batch_driver_same_staging_and_publish_root path={}",
+                path.display()
+            ),
+            Self::SerializeManifest { reason } => {
+                write!(f, "issue_wiki batch_driver_manifest_serialize {reason}")
+            }
+            Self::RefusedManifestEntries {
+                stale,
+                malformed,
+                conflict,
+            } => write!(
+                f,
+                "issue_wiki batch_driver_refused_manifest_entries stale={stale} malformed={malformed} conflict={conflict}"
+            ),
+            Self::Publish { source } => write!(f, "issue_wiki batch_driver_publish {source}"),
+        }
+    }
+}
+
+impl std::error::Error for IssueWikiBatchDriverError {}
+
+impl From<IssueWikiWriteError> for IssueWikiBatchDriverError {
+    fn from(source: IssueWikiWriteError) -> Self {
+        Self::Materialize { source }
+    }
+}
+
+impl From<IssueWikiPublishError> for IssueWikiBatchDriverError {
+    fn from(source: IssueWikiPublishError) -> Self {
+        Self::Publish { source }
+    }
+}
+
+/// Run the manifest-backed issue-wiki batch driver.
+///
+/// The driver has two filesystem roots by design:
+///
+/// - `staging_root` is where the issue export is projected and materialized to
+///   produce the frozen #52 manifest.
+/// - `publish_wiki_root` is the live wiki checkout consumed by the #53 publish
+///   boundary when `explicit_publish_opt_in` is true.
+///
+/// When publish is requested, the driver serializes the manifest it just froze
+/// and hands that exact `manifest_key` to the publish boundary. It never
+/// reselects issues or reruns projection at the side-effect boundary.
+///
+/// # Errors
+/// Returns [`IssueWikiBatchDriverError`] if staging fails, if the manifest
+/// contains stale/malformed/conflict rows while publish is requested, or if the
+/// publish boundary refuses or fails.
+pub fn run_issue_wiki_batch_driver(
+    staging_root: impl AsRef<Path>,
+    publish_wiki_root: impl AsRef<Path>,
+    export: &IssueWikiBatchExport,
+    explicit_publish_opt_in: bool,
+    transport: &mut impl IssueWikiPublishTransport,
+) -> Result<IssueWikiBatchDriverReceipt, IssueWikiBatchDriverError> {
+    let staging_root = staging_root.as_ref();
+    let publish_wiki_root = publish_wiki_root.as_ref();
+    if explicit_publish_opt_in && same_filesystem_root(staging_root, publish_wiki_root) {
+        return Err(IssueWikiBatchDriverError::SameStagingAndPublishRoot {
+            path: staging_root.to_path_buf(),
+        });
+    }
+    let manifest = materialize_issue_wiki_batch_manifest(staging_root, export)?;
+    let publish_receipt = if explicit_publish_opt_in {
+        let (stale, malformed, conflict) = manifest_refusal_counts(&manifest);
+        if stale != 0 || malformed != 0 || conflict != 0 {
+            return Err(IssueWikiBatchDriverError::RefusedManifestEntries {
+                stale,
+                malformed,
+                conflict,
+            });
+        }
+        let manifest_json = serde_json::to_vec(&manifest).map_err(|err| {
+            IssueWikiBatchDriverError::SerializeManifest {
+                reason: err.to_string(),
+            }
+        })?;
+        Some(publish_issue_wiki_batch_manifest_json(
+            publish_wiki_root,
+            &manifest_json,
+            &manifest.manifest_key,
+            true,
+            transport,
+        )?)
+    } else {
+        None
+    };
+    let receipt = IssueWikiBatchDriverReceipt {
+        schema_id: ISSUE_WIKI_BATCH_DRIVER_RECEIPT_SCHEMA_ID_V0.to_owned(),
+        issue_export_hash: manifest.issue_export_hash.clone(),
+        issue_set_selector: manifest.issue_set_selector.clone(),
+        projection_schema_digest: manifest.projection_schema_digest.clone(),
+        manifest_key: manifest.manifest_key.clone(),
+        manifest,
+        publish_requested: explicit_publish_opt_in,
+        publish_receipt,
+        driver_key: ContentHashHex::new("0".repeat(64))
+            .expect("zero placeholder is valid lowercase hex"),
+    };
+    Ok(IssueWikiBatchDriverReceipt {
+        driver_key: issue_wiki_batch_driver_key(&receipt),
+        ..receipt
+    })
 }
 
 /// Publish a frozen issue-wiki batch manifest into a wiki checkout and enter the
@@ -1841,6 +2124,91 @@ fn issue_wiki_publish_key(receipt: &IssueWikiPublishReceipt) -> ContentHashHex {
         .expect("blake3 lowercase hex is always valid")
 }
 
+fn issue_wiki_batch_driver_key(receipt: &IssueWikiBatchDriverReceipt) -> ContentHashHex {
+    let mut hasher = blake3::Hasher::new();
+    hash_part(&mut hasher, receipt.schema_id.as_bytes());
+    hash_part(&mut hasher, receipt.issue_export_hash.as_str().as_bytes());
+    hash_part(&mut hasher, receipt.issue_set_selector.as_bytes());
+    hash_part(
+        &mut hasher,
+        receipt.projection_schema_digest.as_str().as_bytes(),
+    );
+    hash_part(&mut hasher, receipt.manifest_key.as_str().as_bytes());
+    hash_part(
+        &mut hasher,
+        receipt.manifest.manifest_key.as_str().as_bytes(),
+    );
+    hash_part(&mut hasher, &[u8::from(receipt.publish_requested)]);
+    if let Some(publish) = &receipt.publish_receipt {
+        hash_part(&mut hasher, publish.publish_key.as_str().as_bytes());
+    }
+    ContentHashHex::new(hasher.finalize().to_hex().to_string())
+        .expect("blake3 lowercase hex is always valid")
+}
+
+fn manifest_refusal_counts(manifest: &IssueWikiBatchManifest) -> (usize, usize, usize) {
+    let mut stale = 0;
+    let mut malformed = 0;
+    let mut conflict = 0;
+    for entry in &manifest.entries {
+        match entry.status {
+            IssueWikiBatchStatus::Stale => stale += 1,
+            IssueWikiBatchStatus::Malformed => malformed += 1,
+            IssueWikiBatchStatus::Conflict => conflict += 1,
+            IssueWikiBatchStatus::Written | IssueWikiBatchStatus::Noop => {}
+        }
+    }
+    (stale, malformed, conflict)
+}
+
+fn same_filesystem_root(left: &Path, right: &Path) -> bool {
+    if left == right {
+        return true;
+    }
+    match (fs::canonicalize(left), fs::canonicalize(right)) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => false,
+    }
+}
+
+fn manifest_publish_bindings(
+    manifest: &IssueWikiBatchManifest,
+) -> Vec<(String, ContentHashHex, ContentHashHex)> {
+    let mut out = manifest
+        .entries
+        .iter()
+        .filter_map(|entry| {
+            entry.write_receipt.as_ref().map(|write| {
+                (
+                    write.page_path.clone(),
+                    write.write_key.clone(),
+                    write.post_write_snapshot.page_hash.clone(),
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+    out.sort_by(|left, right| left.0.cmp(&right.0).then(left.1.cmp(&right.1)));
+    out
+}
+
+fn publish_receipt_bindings(
+    receipt: &IssueWikiPublishReceipt,
+) -> Vec<(String, ContentHashHex, ContentHashHex)> {
+    let mut out = receipt
+        .entries
+        .iter()
+        .map(|entry| {
+            (
+                entry.page_path.clone(),
+                entry.write_key.clone(),
+                entry.post_publish_snapshot.page_hash.clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+    out.sort_by(|left, right| left.0.cmp(&right.0).then(left.1.cmp(&right.1)));
+    out
+}
+
 fn issue_wiki_manifest_tree_hash(
     wiki_root: &Path,
     manifest: &IssueWikiBatchManifest,
@@ -2552,6 +2920,167 @@ reference: wiki:Attractor/Batch-Migration-Manifest\n"
             .path()
             .join("Attractor/Batch-Migration-Manifest.md")
             .exists());
+    }
+
+    #[test]
+    fn batch_driver_plan_only_freezes_manifest_without_publish() {
+        let staging = TestDir::new();
+        let publish = TestDir::new();
+        let export = issue_export("repo=gwild/attractor issue=52", 52, issue_source_bytes());
+        let mut push = RecordingPush::default();
+
+        let receipt =
+            run_issue_wiki_batch_driver(staging.path(), publish.path(), &export, false, &mut push)
+                .unwrap();
+        let json = serde_json::to_string(&receipt).unwrap();
+        let roundtrip = serde_json::from_str::<IssueWikiBatchDriverReceipt>(&json).unwrap();
+
+        assert_eq!(
+            receipt.schema_id,
+            ISSUE_WIKI_BATCH_DRIVER_RECEIPT_SCHEMA_ID_V0
+        );
+        assert_eq!(receipt.manifest_key, receipt.manifest.manifest_key);
+        assert_eq!(
+            receipt.issue_export_hash,
+            receipt.manifest.issue_export_hash
+        );
+        assert_eq!(receipt.issue_set_selector, "repo=gwild/attractor issue=52");
+        assert!(!receipt.publish_requested);
+        assert!(receipt.publish_receipt.is_none());
+        assert_eq!(push.calls, 0);
+        assert_eq!(roundtrip.driver_key, receipt.driver_key);
+        assert!(!json.contains("identity: attractor.issue.52.batch-manifest"));
+        assert!(!publish
+            .path()
+            .join("Attractor/Batch-Migration-Manifest.md")
+            .exists());
+    }
+
+    #[test]
+    fn batch_driver_publish_consumes_exact_frozen_manifest() {
+        let staging = TestDir::new();
+        let publish = TestDir::new();
+        let export = issue_export("repo=gwild/attractor issue=52", 52, issue_source_bytes());
+        let mut push = RecordingPush::default();
+
+        let receipt =
+            run_issue_wiki_batch_driver(staging.path(), publish.path(), &export, true, &mut push)
+                .unwrap();
+        let publish_receipt = receipt.publish_receipt.as_ref().unwrap();
+        let roundtrip = serde_json::from_value::<IssueWikiBatchDriverReceipt>(
+            serde_json::to_value(&receipt).unwrap(),
+        )
+        .unwrap();
+
+        assert!(receipt.publish_requested);
+        assert_eq!(publish_receipt.manifest_key, receipt.manifest_key);
+        assert_eq!(
+            publish_receipt.projection_schema_digest,
+            receipt.projection_schema_digest
+        );
+        assert!(publish_receipt.pushed);
+        assert_eq!(
+            publish_receipt.entries[0].action,
+            IssueWikiPublishAction::Published
+        );
+        assert_eq!(push.calls, 1);
+        assert_eq!(push.manifest_keys, vec![receipt.manifest_key.clone()]);
+        assert_eq!(
+            push.relative_paths,
+            vec![vec!["Attractor/Batch-Migration-Manifest.md".to_owned()]]
+        );
+        assert_eq!(roundtrip.driver_key, receipt.driver_key);
+    }
+
+    #[test]
+    fn batch_driver_publish_refuses_manifest_with_stale_rows_before_push() {
+        let staging = TestDir::new();
+        let publish = TestDir::new();
+        let mut export = issue_export("repo=gwild/attractor issue=52", 52, issue_source_bytes());
+        export.issues[0].source.source_hash = hash_bytes(b"old source");
+        let mut push = RecordingPush::default();
+
+        let err =
+            run_issue_wiki_batch_driver(staging.path(), publish.path(), &export, true, &mut push)
+                .unwrap_err();
+
+        match err {
+            IssueWikiBatchDriverError::RefusedManifestEntries {
+                stale,
+                malformed,
+                conflict,
+            } => {
+                assert_eq!(stale, 1);
+                assert_eq!(malformed, 0);
+                assert_eq!(conflict, 0);
+            }
+            other => panic!("expected refused manifest entries, got {other:?}"),
+        }
+        assert_eq!(push.calls, 0);
+    }
+
+    #[test]
+    fn batch_driver_publish_refuses_same_staging_and_publish_root() {
+        let staging = TestDir::new();
+        let export = issue_export("repo=gwild/attractor issue=52", 52, issue_source_bytes());
+        let mut push = RecordingPush::default();
+
+        let err =
+            run_issue_wiki_batch_driver(staging.path(), staging.path(), &export, true, &mut push)
+                .unwrap_err();
+
+        assert!(matches!(
+            err,
+            IssueWikiBatchDriverError::SameStagingAndPublishRoot { .. }
+        ));
+        assert_eq!(push.calls, 0);
+        assert!(!staging
+            .path()
+            .join("Attractor/Batch-Migration-Manifest.md")
+            .exists());
+    }
+
+    #[test]
+    fn batch_driver_receipt_rejects_recomputed_key_manifest_tamper() {
+        let staging = TestDir::new();
+        let publish = TestDir::new();
+        let export = issue_export("repo=gwild/attractor issue=52", 52, issue_source_bytes());
+        let mut push = RecordingPush::default();
+        let mut receipt =
+            run_issue_wiki_batch_driver(staging.path(), publish.path(), &export, false, &mut push)
+                .unwrap();
+        receipt.manifest_key = hash_bytes(b"forged manifest key");
+        receipt.driver_key = issue_wiki_batch_driver_key(&receipt);
+        let value = serde_json::to_value(receipt).unwrap();
+
+        let err = serde_json::from_value::<IssueWikiBatchDriverReceipt>(value).unwrap_err();
+
+        assert!(err
+            .to_string()
+            .contains("batch_driver_manifest_key_mismatch"));
+    }
+
+    #[test]
+    fn batch_driver_receipt_rejects_recomputed_key_publish_entry_tamper() {
+        let staging = TestDir::new();
+        let publish = TestDir::new();
+        let export = issue_export("repo=gwild/attractor issue=52", 52, issue_source_bytes());
+        let mut push = RecordingPush::default();
+        let mut receipt =
+            run_issue_wiki_batch_driver(staging.path(), publish.path(), &export, true, &mut push)
+                .unwrap();
+        let publish = receipt.publish_receipt.as_mut().unwrap();
+        publish.entries[0].post_publish_snapshot =
+            IssueWikiPageSnapshot::from_page_bytes("Attractor/Batch-Migration-Manifest", b"forged");
+        publish.publish_key = issue_wiki_publish_key(publish);
+        receipt.driver_key = issue_wiki_batch_driver_key(&receipt);
+        let value = serde_json::to_value(receipt).unwrap();
+
+        let err = serde_json::from_value::<IssueWikiBatchDriverReceipt>(value).unwrap_err();
+
+        assert!(err
+            .to_string()
+            .contains("batch_driver_publish_entries_mismatch"));
     }
 
     #[test]
