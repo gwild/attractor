@@ -29,6 +29,11 @@ pub const ISSUE_WIKI_PUBLISH_RECEIPT_SCHEMA_ID_V0: &str = "attractor.issue_wiki.
 /// Stable schema id for issue-wiki batch run receipts.
 pub const ISSUE_WIKI_BATCH_RUN_RECEIPT_SCHEMA_ID_V0: &str =
     "attractor.issue_wiki.batch_run_receipt.v0";
+/// Stable schema id for issue-wiki parallel-prep claim ledgers.
+pub const ISSUE_WIKI_BATCH_CLAIM_LEDGER_SCHEMA_ID_V0: &str =
+    "attractor.issue_wiki.batch_claim_ledger.v0";
+/// Stable schema id for serialized issue-wiki publish leases.
+pub const ISSUE_WIKI_PUBLISH_LEASE_SCHEMA_ID_V0: &str = "attractor.issue_wiki.publish_lease.v0";
 
 /// Materialized local write action.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -282,6 +287,70 @@ pub struct IssueWikiBatchRunReceipt {
     pub run_key: ContentHashHex,
 }
 
+/// Immutable roster entry for deterministic issue partitioning.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueWikiBatchPartitionRosterEntry {
+    /// Agent/operator id in the partition roster.
+    pub operator_id: String,
+    /// Stable modulo index assigned to this operator.
+    pub partition_index: u64,
+}
+
+/// One coordinator-assigned issue selector claim for parallel manifest prep.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct IssueWikiBatchClaim {
+    /// Agent/operator assigned this disjoint slice.
+    pub operator_id: String,
+    /// Operator's immutable modulo index from the roster.
+    pub partition_index: u64,
+    /// Immutable modulo size from the roster.
+    pub partition_modulus: u64,
+    /// Hash of the immutable roster this claim belongs to.
+    pub roster_hash: ContentHashHex,
+    /// Exact selector the claimed export must carry.
+    pub issue_set_selector: String,
+    /// Canonical ascending issue-number set assigned to this operator.
+    pub issue_numbers: Vec<u64>,
+    /// Deterministic key for this selector claim.
+    pub claim_key: ContentHashHex,
+}
+
+/// Coordinator ledger proving parallel prep slices are disjoint before freeze.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct IssueWikiBatchClaimLedger {
+    /// Schema id this claim ledger used.
+    pub schema_id: String,
+    /// Wiki origin head every claim was assigned against.
+    pub wiki_origin_head: String,
+    /// Immutable ordered roster used for modulo partitioning.
+    pub roster: Vec<IssueWikiBatchPartitionRosterEntry>,
+    /// Hash of the immutable roster.
+    pub roster_hash: ContentHashHex,
+    /// Disjoint selector claims.
+    pub claims: Vec<IssueWikiBatchClaim>,
+    /// Deterministic key for the whole claim ledger.
+    pub ledger_key: ContentHashHex,
+}
+
+/// Serialized publish-lane lease for one frozen manifest.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct IssueWikiPublishLease {
+    /// Schema id this publish lease used.
+    pub schema_id: String,
+    /// Agent/operator holding the serialized wiki-push lane.
+    pub holder_id: String,
+    /// Monotonic queue slot assigned by the coordinator.
+    pub queue_index: u64,
+    /// Wiki origin head observed when the lease was granted.
+    pub wiki_origin_head: String,
+    /// Hash of the immutable roster that produced the manifest claim.
+    pub roster_hash: ContentHashHex,
+    /// Exact frozen manifest key authorized for this push slot.
+    pub manifest_key: ContentHashHex,
+    /// Deterministic key for this publish lease.
+    pub lease_key: ContentHashHex,
+}
+
 impl<'de> Deserialize<'de> for IssueWikiBatchManifest {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -335,6 +404,80 @@ impl<'de> Deserialize<'de> for IssueWikiBatchRunReceipt {
     }
 }
 
+impl<'de> Deserialize<'de> for IssueWikiBatchClaim {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let claim = IssueWikiBatchClaimWire::deserialize(deserializer)?;
+        let claim = Self {
+            operator_id: claim.operator_id,
+            partition_index: claim.partition_index,
+            partition_modulus: claim.partition_modulus,
+            roster_hash: claim.roster_hash,
+            issue_set_selector: claim.issue_set_selector,
+            issue_numbers: claim.issue_numbers,
+            claim_key: claim.claim_key,
+        };
+        claim
+            .validate_structural_invariants()
+            .map_err(serde::de::Error::custom)?;
+        claim
+            .validate_claim_key()
+            .map_err(serde::de::Error::custom)?;
+        Ok(claim)
+    }
+}
+
+impl<'de> Deserialize<'de> for IssueWikiBatchClaimLedger {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let ledger = IssueWikiBatchClaimLedgerWire::deserialize(deserializer)?;
+        let ledger = Self {
+            schema_id: ledger.schema_id,
+            wiki_origin_head: ledger.wiki_origin_head,
+            roster: ledger.roster,
+            roster_hash: ledger.roster_hash,
+            claims: ledger.claims,
+            ledger_key: ledger.ledger_key,
+        };
+        ledger
+            .validate_structural_invariants()
+            .map_err(serde::de::Error::custom)?;
+        ledger
+            .validate_ledger_key()
+            .map_err(serde::de::Error::custom)?;
+        Ok(ledger)
+    }
+}
+
+impl<'de> Deserialize<'de> for IssueWikiPublishLease {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let lease = IssueWikiPublishLeaseWire::deserialize(deserializer)?;
+        let lease = Self {
+            schema_id: lease.schema_id,
+            holder_id: lease.holder_id,
+            queue_index: lease.queue_index,
+            wiki_origin_head: lease.wiki_origin_head,
+            roster_hash: lease.roster_hash,
+            manifest_key: lease.manifest_key,
+            lease_key: lease.lease_key,
+        };
+        lease
+            .validate_structural_invariants()
+            .map_err(serde::de::Error::custom)?;
+        lease
+            .validate_lease_key()
+            .map_err(serde::de::Error::custom)?;
+        Ok(lease)
+    }
+}
+
 #[derive(Deserialize)]
 struct IssueWikiBatchManifestWire {
     schema_id: String,
@@ -358,6 +501,38 @@ struct IssueWikiBatchRunReceiptWire {
     publish_key: ContentHashHex,
     status: IssueWikiBatchRunStatus,
     run_key: ContentHashHex,
+}
+
+#[derive(Deserialize)]
+struct IssueWikiBatchClaimWire {
+    operator_id: String,
+    partition_index: u64,
+    partition_modulus: u64,
+    roster_hash: ContentHashHex,
+    issue_set_selector: String,
+    issue_numbers: Vec<u64>,
+    claim_key: ContentHashHex,
+}
+
+#[derive(Deserialize)]
+struct IssueWikiBatchClaimLedgerWire {
+    schema_id: String,
+    wiki_origin_head: String,
+    roster: Vec<IssueWikiBatchPartitionRosterEntry>,
+    roster_hash: ContentHashHex,
+    claims: Vec<IssueWikiBatchClaim>,
+    ledger_key: ContentHashHex,
+}
+
+#[derive(Deserialize)]
+struct IssueWikiPublishLeaseWire {
+    schema_id: String,
+    holder_id: String,
+    queue_index: u64,
+    wiki_origin_head: String,
+    roster_hash: ContentHashHex,
+    manifest_key: ContentHashHex,
+    lease_key: ContentHashHex,
 }
 
 impl<'de> Deserialize<'de> for IssueWikiWriteReceipt {
@@ -714,6 +889,190 @@ impl IssueWikiBatchRunReceipt {
                     "issue_wiki batch_run_publish_pre_snapshot_mismatch index={index}"
                 ));
             }
+        }
+        Ok(())
+    }
+}
+
+impl IssueWikiBatchClaim {
+    fn validate_claim_key(&self) -> Result<(), String> {
+        let expected = issue_wiki_batch_claim_key(self);
+        if self.claim_key == expected {
+            Ok(())
+        } else {
+            Err(format!(
+                "issue_wiki batch_claim_key_mismatch expected={} actual={}",
+                expected.as_str(),
+                self.claim_key.as_str()
+            ))
+        }
+    }
+
+    fn validate_structural_invariants(&self) -> Result<(), String> {
+        if self.operator_id.trim().is_empty() {
+            return Err("issue_wiki batch_claim_empty_operator".to_owned());
+        }
+        if self.partition_modulus == 0 {
+            return Err("issue_wiki batch_claim_zero_modulus".to_owned());
+        }
+        if self.partition_index >= self.partition_modulus {
+            return Err(format!(
+                "issue_wiki batch_claim_partition_index_out_of_range index={} modulus={}",
+                self.partition_index, self.partition_modulus
+            ));
+        }
+        if self.issue_set_selector.trim().is_empty() {
+            return Err("issue_wiki batch_claim_empty_selector".to_owned());
+        }
+        if self.issue_numbers.is_empty() {
+            return Err("issue_wiki batch_claim_empty_issues".to_owned());
+        }
+        let mut last = None;
+        for issue_number in &self.issue_numbers {
+            if *issue_number == 0 {
+                return Err("issue_wiki batch_claim_zero_issue".to_owned());
+            }
+            if issue_number % self.partition_modulus != self.partition_index {
+                return Err(format!(
+                    "issue_wiki batch_claim_partition_mismatch issue_number={} index={} modulus={}",
+                    issue_number, self.partition_index, self.partition_modulus
+                ));
+            }
+            if let Some(last) = last {
+                if *issue_number <= last {
+                    return Err(format!(
+                        "issue_wiki batch_claim_issue_order expected_gt={} actual={}",
+                        last, issue_number
+                    ));
+                }
+            }
+            last = Some(*issue_number);
+        }
+        Ok(())
+    }
+}
+
+impl IssueWikiBatchClaimLedger {
+    fn validate_ledger_key(&self) -> Result<(), String> {
+        let expected = issue_wiki_batch_claim_ledger_key(self);
+        if self.ledger_key == expected {
+            Ok(())
+        } else {
+            Err(format!(
+                "issue_wiki batch_claim_ledger_key_mismatch expected={} actual={}",
+                expected.as_str(),
+                self.ledger_key.as_str()
+            ))
+        }
+    }
+
+    fn validate_structural_invariants(&self) -> Result<(), String> {
+        if self.schema_id != ISSUE_WIKI_BATCH_CLAIM_LEDGER_SCHEMA_ID_V0 {
+            return Err(format!(
+                "issue_wiki batch_claim_ledger_schema_mismatch expected={} actual={}",
+                ISSUE_WIKI_BATCH_CLAIM_LEDGER_SCHEMA_ID_V0, self.schema_id
+            ));
+        }
+        if self.wiki_origin_head.trim().is_empty() {
+            return Err("issue_wiki batch_claim_ledger_empty_origin".to_owned());
+        }
+        if self.roster.is_empty() {
+            return Err("issue_wiki batch_claim_ledger_empty_roster".to_owned());
+        }
+        let expected_roster_hash = issue_wiki_batch_partition_roster_hash(&self.roster);
+        if self.roster_hash != expected_roster_hash {
+            return Err(format!(
+                "issue_wiki batch_claim_roster_hash_mismatch expected={} actual={}",
+                expected_roster_hash.as_str(),
+                self.roster_hash.as_str()
+            ));
+        }
+        for (expected_index, entry) in self.roster.iter().enumerate() {
+            if entry.operator_id.trim().is_empty() {
+                return Err("issue_wiki batch_claim_roster_empty_operator".to_owned());
+            }
+            if entry.partition_index != expected_index as u64 {
+                return Err(format!(
+                    "issue_wiki batch_claim_roster_index_mismatch expected={} actual={}",
+                    expected_index, entry.partition_index
+                ));
+            }
+        }
+        if self.claims.is_empty() {
+            return Err("issue_wiki batch_claim_ledger_empty_claims".to_owned());
+        }
+        let mut seen = std::collections::BTreeMap::new();
+        for (claim_index, claim) in self.claims.iter().enumerate() {
+            claim.validate_structural_invariants()?;
+            claim.validate_claim_key()?;
+            if claim.partition_modulus != self.roster.len() as u64 {
+                return Err(format!(
+                    "issue_wiki batch_claim_modulus_mismatch expected={} actual={}",
+                    self.roster.len(),
+                    claim.partition_modulus
+                ));
+            }
+            let roster_entry =
+                self.roster
+                    .get(claim.partition_index as usize)
+                    .ok_or_else(|| {
+                        format!(
+                            "issue_wiki batch_claim_roster_missing_index index={}",
+                            claim.partition_index
+                        )
+                    })?;
+            if roster_entry.operator_id != claim.operator_id {
+                return Err(format!(
+                    "issue_wiki batch_claim_operator_mismatch index={} roster={} claim={}",
+                    claim.partition_index, roster_entry.operator_id, claim.operator_id
+                ));
+            }
+            if claim.roster_hash != self.roster_hash {
+                return Err(format!(
+                    "issue_wiki batch_claim_claim_roster_hash_mismatch expected={} actual={}",
+                    self.roster_hash.as_str(),
+                    claim.roster_hash.as_str()
+                ));
+            }
+            for issue_number in &claim.issue_numbers {
+                if let Some(previous_index) = seen.insert(*issue_number, claim_index) {
+                    return Err(format!(
+                        "issue_wiki batch_claim_overlap issue_number={} first_claim={} second_claim={}",
+                        issue_number, previous_index, claim_index
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+impl IssueWikiPublishLease {
+    fn validate_lease_key(&self) -> Result<(), String> {
+        let expected = issue_wiki_publish_lease_key(self);
+        if self.lease_key == expected {
+            Ok(())
+        } else {
+            Err(format!(
+                "issue_wiki publish_lease_key_mismatch expected={} actual={}",
+                expected.as_str(),
+                self.lease_key.as_str()
+            ))
+        }
+    }
+
+    fn validate_structural_invariants(&self) -> Result<(), String> {
+        if self.schema_id != ISSUE_WIKI_PUBLISH_LEASE_SCHEMA_ID_V0 {
+            return Err(format!(
+                "issue_wiki publish_lease_schema_mismatch expected={} actual={}",
+                ISSUE_WIKI_PUBLISH_LEASE_SCHEMA_ID_V0, self.schema_id
+            ));
+        }
+        if self.holder_id.trim().is_empty() {
+            return Err("issue_wiki publish_lease_empty_holder".to_owned());
+        }
+        if self.wiki_origin_head.trim().is_empty() {
+            return Err("issue_wiki publish_lease_empty_origin".to_owned());
         }
         Ok(())
     }
@@ -1188,6 +1547,18 @@ pub enum IssueWikiPublishError {
         expected: ContentHashHex,
         actual: ContentHashHex,
     },
+    /// The supplied publish lease failed its own deserialize proof.
+    InvalidLease { reason: String },
+    /// The supplied publish lease does not authorize this manifest.
+    LeaseManifestMismatch {
+        expected: ContentHashHex,
+        actual: ContentHashHex,
+    },
+    /// The supplied publish lease belongs to a different active partition run.
+    LeaseRosterMismatch {
+        expected: ContentHashHex,
+        actual: ContentHashHex,
+    },
     /// The manifest was produced by a different projection/schema contract.
     StaleProjection {
         manifest_digest: ContentHashHex,
@@ -1221,6 +1592,19 @@ impl fmt::Display for IssueWikiPublishError {
             Self::ManifestKeyMismatch { expected, actual } => write!(
                 f,
                 "issue_wiki manifest_key_mismatch expected={} actual={}",
+                expected.as_str(),
+                actual.as_str()
+            ),
+            Self::InvalidLease { reason } => write!(f, "issue_wiki invalid_publish_lease {reason}"),
+            Self::LeaseManifestMismatch { expected, actual } => write!(
+                f,
+                "issue_wiki publish_lease_manifest_mismatch expected={} actual={}",
+                expected.as_str(),
+                actual.as_str()
+            ),
+            Self::LeaseRosterMismatch { expected, actual } => write!(
+                f,
+                "issue_wiki publish_lease_roster_mismatch expected={} actual={}",
                 expected.as_str(),
                 actual.as_str()
             ),
@@ -1314,6 +1698,41 @@ pub enum IssueWikiBatchRunError {
     /// The publish boundary refused or failed.
     Publish(IssueWikiPublishError),
 }
+
+/// Claim enforcement errors for parallel no-network manifest preparation.
+#[derive(Debug)]
+pub enum IssueWikiBatchClaimError {
+    /// The claim failed its self-validation proof.
+    InvalidClaim { reason: String },
+    /// The export selector differs from the assigned claim selector.
+    SelectorMismatch { expected: String, actual: String },
+    /// The export issue set differs from the assigned claim.
+    IssueSetMismatch {
+        expected: Vec<u64>,
+        actual: Vec<u64>,
+    },
+    /// Manifest construction failed after the claim matched.
+    Manifest(IssueWikiWriteError),
+}
+
+impl fmt::Display for IssueWikiBatchClaimError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidClaim { reason } => write!(f, "issue_wiki batch_claim_invalid {reason}"),
+            Self::SelectorMismatch { expected, actual } => write!(
+                f,
+                "issue_wiki batch_claim_selector_mismatch expected={expected} actual={actual}"
+            ),
+            Self::IssueSetMismatch { expected, actual } => write!(
+                f,
+                "issue_wiki batch_claim_issue_set_mismatch expected={expected:?} actual={actual:?}"
+            ),
+            Self::Manifest(err) => write!(f, "{err}"),
+        }
+    }
+}
+
+impl std::error::Error for IssueWikiBatchClaimError {}
 
 impl fmt::Display for IssueWikiBatchRunError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -1469,6 +1888,170 @@ pub fn run_issue_wiki_batch_driver(
     })
 }
 
+/// Verify that an export exactly matches the coordinator-assigned claim.
+///
+/// This is the parallel-prep boundary: agents may materialize manifests in
+/// parallel only after this check proves the export selector and issue set are
+/// exactly the claimed slice.
+///
+/// # Errors
+/// Returns [`IssueWikiBatchClaimError`] if the claim is invalid, the selector
+/// differs, or the export contains any issue outside the assigned set.
+pub fn validate_issue_wiki_export_claim(
+    export: &IssueWikiBatchExport,
+    claim: &IssueWikiBatchClaim,
+) -> Result<(), IssueWikiBatchClaimError> {
+    claim
+        .validate_structural_invariants()
+        .map_err(|reason| IssueWikiBatchClaimError::InvalidClaim { reason })?;
+    claim
+        .validate_claim_key()
+        .map_err(|reason| IssueWikiBatchClaimError::InvalidClaim { reason })?;
+    if export.issue_set_selector != claim.issue_set_selector {
+        return Err(IssueWikiBatchClaimError::SelectorMismatch {
+            expected: claim.issue_set_selector.clone(),
+            actual: export.issue_set_selector.clone(),
+        });
+    }
+    let mut actual = export
+        .issues
+        .iter()
+        .map(|issue| issue.source.issue_number)
+        .collect::<Vec<_>>();
+    actual.sort_unstable();
+    if actual != claim.issue_numbers {
+        return Err(IssueWikiBatchClaimError::IssueSetMismatch {
+            expected: claim.issue_numbers.clone(),
+            actual,
+        });
+    }
+    Ok(())
+}
+
+/// Materialize a no-network batch only after it matches its assigned claim.
+///
+/// # Errors
+/// Returns [`IssueWikiBatchClaimError`] if the export is outside its claim or if
+/// manifest construction fails.
+pub fn materialize_claimed_issue_wiki_batch_manifest(
+    wiki_root: impl AsRef<Path>,
+    export: &IssueWikiBatchExport,
+    claim: &IssueWikiBatchClaim,
+) -> Result<IssueWikiBatchManifest, IssueWikiBatchClaimError> {
+    validate_issue_wiki_export_claim(export, claim)?;
+    materialize_issue_wiki_batch_manifest(wiki_root, export)
+        .map_err(IssueWikiBatchClaimError::Manifest)
+}
+
+/// Build a deterministic partition ledger for parallel manifest preparation.
+///
+/// Each `issue_number` is assigned to exactly one operator by
+/// `issue_number % operators.len()`. The resulting ledger self-validates that
+/// every claim is non-empty, sorted, unique, and globally disjoint. It does not
+/// authorize concurrent wiki pushes; publish still requires a serialized lease.
+///
+/// # Panics
+/// Panics if `operators` is empty. Callers should treat an empty runner set as a
+/// configuration error.
+#[must_use]
+pub fn issue_wiki_deterministic_partition_ledger(
+    wiki_origin_head: impl Into<String>,
+    base_selector: impl AsRef<str>,
+    issue_numbers: &[u64],
+    operators: &[impl AsRef<str>],
+) -> IssueWikiBatchClaimLedger {
+    assert!(
+        !operators.is_empty(),
+        "issue_wiki deterministic partition requires at least one operator"
+    );
+    let mut sorted = issue_numbers.to_vec();
+    sorted.sort_unstable();
+    sorted.dedup();
+    let mut lanes = vec![Vec::new(); operators.len()];
+    for issue_number in sorted {
+        let lane = (issue_number as usize) % operators.len();
+        lanes[lane].push(issue_number);
+    }
+    let roster = operators
+        .iter()
+        .enumerate()
+        .map(|(index, operator)| IssueWikiBatchPartitionRosterEntry {
+            operator_id: operator.as_ref().to_owned(),
+            partition_index: index as u64,
+        })
+        .collect::<Vec<_>>();
+    let roster_hash = issue_wiki_batch_partition_roster_hash(&roster);
+    let mut claims = Vec::new();
+    for (index, issue_numbers) in lanes.into_iter().enumerate() {
+        if issue_numbers.is_empty() {
+            continue;
+        }
+        let operator_id = operators[index].as_ref().to_owned();
+        let issue_set_selector = format!(
+            "{} partition=mod:{}:{}",
+            base_selector.as_ref(),
+            operators.len(),
+            index
+        );
+        let claim = IssueWikiBatchClaim {
+            operator_id,
+            partition_index: index as u64,
+            partition_modulus: operators.len() as u64,
+            roster_hash: roster_hash.clone(),
+            issue_set_selector,
+            issue_numbers,
+            claim_key: ContentHashHex::new("0".repeat(64))
+                .expect("zero placeholder is valid lowercase hex"),
+        };
+        claims.push(IssueWikiBatchClaim {
+            claim_key: issue_wiki_batch_claim_key(&claim),
+            ..claim
+        });
+    }
+    let ledger = IssueWikiBatchClaimLedger {
+        schema_id: ISSUE_WIKI_BATCH_CLAIM_LEDGER_SCHEMA_ID_V0.to_owned(),
+        wiki_origin_head: wiki_origin_head.into(),
+        roster,
+        roster_hash,
+        claims,
+        ledger_key: ContentHashHex::new("0".repeat(64))
+            .expect("zero placeholder is valid lowercase hex"),
+    };
+    IssueWikiBatchClaimLedger {
+        ledger_key: issue_wiki_batch_claim_ledger_key(&ledger),
+        ..ledger
+    }
+}
+
+/// Mint a serialized publish-lane lease for one manifest key.
+///
+/// The lease is intentionally one-manifest/one-queue-slot. It makes the wiki
+/// push serialization explicit without allowing selector/projector inputs at the
+/// publish boundary.
+#[must_use]
+pub fn issue_wiki_publish_lease(
+    holder_id: impl Into<String>,
+    queue_index: u64,
+    wiki_origin_head: impl Into<String>,
+    roster_hash: ContentHashHex,
+    manifest_key: ContentHashHex,
+) -> IssueWikiPublishLease {
+    let lease = IssueWikiPublishLease {
+        schema_id: ISSUE_WIKI_PUBLISH_LEASE_SCHEMA_ID_V0.to_owned(),
+        holder_id: holder_id.into(),
+        queue_index,
+        wiki_origin_head: wiki_origin_head.into(),
+        roster_hash,
+        manifest_key,
+        lease_key: ContentHashHex::new("0".repeat(64))
+            .expect("zero placeholder is valid lowercase hex"),
+    };
+    IssueWikiPublishLease {
+        lease_key: issue_wiki_publish_lease_key(&lease),
+        ..lease
+    }
+}
+
 /// Publish a frozen issue-wiki batch manifest into a wiki checkout and enter the
 /// supplied transport only if the checkout changed.
 ///
@@ -1495,6 +2078,52 @@ pub fn publish_issue_wiki_batch_manifest_json(
         expected_manifest_key,
         explicit_opt_in,
         &issue_wiki_projection_schema_digest(),
+        transport,
+    )
+}
+
+/// Publish a frozen manifest only when a serialized lease names its key.
+///
+/// This entry point is for coordinated parallel runs: local manifest prep may
+/// happen in parallel, but live wiki push enters here through a one-manifest
+/// lease slot.
+///
+/// # Errors
+/// Returns [`IssueWikiPublishError`] if the lease is invalid, belongs to a
+/// different active roster, does not name the manifest key, or the underlying
+/// publish boundary refuses.
+pub fn publish_issue_wiki_batch_manifest_json_with_lease(
+    wiki_root: impl AsRef<Path>,
+    manifest_json: &[u8],
+    expected_manifest_key: &ContentHashHex,
+    active_roster_hash: &ContentHashHex,
+    lease: &IssueWikiPublishLease,
+    explicit_opt_in: bool,
+    transport: &mut impl IssueWikiPublishTransport,
+) -> Result<IssueWikiPublishReceipt, IssueWikiPublishError> {
+    lease
+        .validate_structural_invariants()
+        .map_err(|reason| IssueWikiPublishError::InvalidLease { reason })?;
+    lease
+        .validate_lease_key()
+        .map_err(|reason| IssueWikiPublishError::InvalidLease { reason })?;
+    if &lease.roster_hash != active_roster_hash {
+        return Err(IssueWikiPublishError::LeaseRosterMismatch {
+            expected: active_roster_hash.clone(),
+            actual: lease.roster_hash.clone(),
+        });
+    }
+    if &lease.manifest_key != expected_manifest_key {
+        return Err(IssueWikiPublishError::LeaseManifestMismatch {
+            expected: expected_manifest_key.clone(),
+            actual: lease.manifest_key.clone(),
+        });
+    }
+    publish_issue_wiki_batch_manifest_json(
+        wiki_root,
+        manifest_json,
+        expected_manifest_key,
+        explicit_opt_in,
         transport,
     )
 }
@@ -2248,6 +2877,56 @@ fn issue_wiki_batch_run_key(receipt: &IssueWikiBatchRunReceipt) -> ContentHashHe
     hash_part(&mut hasher, receipt.manifest_key.as_str().as_bytes());
     hash_part(&mut hasher, receipt.publish_key.as_str().as_bytes());
     hash_part(&mut hasher, receipt.status.as_str().as_bytes());
+    ContentHashHex::new(hasher.finalize().to_hex().to_string())
+        .expect("blake3 lowercase hex is always valid")
+}
+
+fn issue_wiki_batch_partition_roster_hash(
+    roster: &[IssueWikiBatchPartitionRosterEntry],
+) -> ContentHashHex {
+    let mut hasher = blake3::Hasher::new();
+    for entry in roster {
+        hash_part(&mut hasher, entry.operator_id.as_bytes());
+        hash_part(&mut hasher, &entry.partition_index.to_le_bytes());
+    }
+    ContentHashHex::new(hasher.finalize().to_hex().to_string())
+        .expect("blake3 lowercase hex is always valid")
+}
+
+fn issue_wiki_batch_claim_key(claim: &IssueWikiBatchClaim) -> ContentHashHex {
+    let mut hasher = blake3::Hasher::new();
+    hash_part(&mut hasher, claim.operator_id.as_bytes());
+    hash_part(&mut hasher, &claim.partition_index.to_le_bytes());
+    hash_part(&mut hasher, &claim.partition_modulus.to_le_bytes());
+    hash_part(&mut hasher, claim.roster_hash.as_str().as_bytes());
+    hash_part(&mut hasher, claim.issue_set_selector.as_bytes());
+    for issue_number in &claim.issue_numbers {
+        hash_part(&mut hasher, &issue_number.to_le_bytes());
+    }
+    ContentHashHex::new(hasher.finalize().to_hex().to_string())
+        .expect("blake3 lowercase hex is always valid")
+}
+
+fn issue_wiki_batch_claim_ledger_key(ledger: &IssueWikiBatchClaimLedger) -> ContentHashHex {
+    let mut hasher = blake3::Hasher::new();
+    hash_part(&mut hasher, ledger.schema_id.as_bytes());
+    hash_part(&mut hasher, ledger.wiki_origin_head.as_bytes());
+    hash_part(&mut hasher, ledger.roster_hash.as_str().as_bytes());
+    for claim in &ledger.claims {
+        hash_part(&mut hasher, claim.claim_key.as_str().as_bytes());
+    }
+    ContentHashHex::new(hasher.finalize().to_hex().to_string())
+        .expect("blake3 lowercase hex is always valid")
+}
+
+fn issue_wiki_publish_lease_key(lease: &IssueWikiPublishLease) -> ContentHashHex {
+    let mut hasher = blake3::Hasher::new();
+    hash_part(&mut hasher, lease.schema_id.as_bytes());
+    hash_part(&mut hasher, lease.holder_id.as_bytes());
+    hash_part(&mut hasher, &lease.queue_index.to_le_bytes());
+    hash_part(&mut hasher, lease.wiki_origin_head.as_bytes());
+    hash_part(&mut hasher, lease.roster_hash.as_str().as_bytes());
+    hash_part(&mut hasher, lease.manifest_key.as_str().as_bytes());
     ContentHashHex::new(hasher.finalize().to_hex().to_string())
         .expect("blake3 lowercase hex is always valid")
 }
@@ -3577,5 +4256,260 @@ reference: wiki:Attractor/Batch-Migration-Manifest\n"
         assert!(err
             .to_string()
             .contains("batch_run_publish_post_snapshot_mismatch"));
+    }
+
+    #[test]
+    fn deterministic_partition_ledger_assigns_disjoint_issue_lanes() {
+        let ledger = issue_wiki_deterministic_partition_ledger(
+            "origin-master-abc",
+            "repo=gwild/milton state=open",
+            &[10, 11, 12, 13, 14, 15],
+            &["ivy", "jan", "rusty"],
+        );
+
+        assert_eq!(ledger.claims.len(), 3);
+        assert_eq!(ledger.claims[0].operator_id, "ivy");
+        assert_eq!(ledger.claims[0].issue_numbers, vec![12, 15]);
+        assert_eq!(ledger.claims[1].operator_id, "jan");
+        assert_eq!(ledger.claims[1].issue_numbers, vec![10, 13]);
+        assert_eq!(ledger.claims[2].operator_id, "rusty");
+        assert_eq!(ledger.claims[2].issue_numbers, vec![11, 14]);
+
+        let value = serde_json::to_value(&ledger).unwrap();
+        serde_json::from_value::<IssueWikiBatchClaimLedger>(value).unwrap();
+        assert_eq!(ledger.roster.len(), 3);
+        assert_eq!(ledger.claims[0].partition_index, 0);
+        assert_eq!(ledger.claims[0].partition_modulus, 3);
+        assert_eq!(ledger.claims[0].roster_hash, ledger.roster_hash);
+    }
+
+    #[test]
+    fn claimed_manifest_prep_requires_exact_selector_and_issue_set() {
+        let staging = TestDir::new();
+        let export = issue_export(
+            "repo=gwild/attractor partition=ivy",
+            52,
+            issue_source_bytes(),
+        );
+        let roster = vec![IssueWikiBatchPartitionRosterEntry {
+            operator_id: "ivy".to_owned(),
+            partition_index: 0,
+        }];
+        let roster_hash = issue_wiki_batch_partition_roster_hash(&roster);
+        let mut claim = IssueWikiBatchClaim {
+            operator_id: "ivy".to_owned(),
+            partition_index: 0,
+            partition_modulus: 1,
+            roster_hash,
+            issue_set_selector: "repo=gwild/attractor partition=ivy".to_owned(),
+            issue_numbers: vec![52],
+            claim_key: ContentHashHex::new("0".repeat(64)).unwrap(),
+        };
+        claim.claim_key = issue_wiki_batch_claim_key(&claim);
+
+        let manifest =
+            materialize_claimed_issue_wiki_batch_manifest(staging.path(), &export, &claim).unwrap();
+
+        assert_eq!(manifest.entries.len(), 1);
+        assert_eq!(manifest.entries[0].issue_number, 52);
+
+        let wrong_selector = issue_export(
+            "repo=gwild/attractor partition=jan",
+            52,
+            issue_source_bytes(),
+        );
+        let selector_err = validate_issue_wiki_export_claim(&wrong_selector, &claim).unwrap_err();
+        assert!(matches!(
+            selector_err,
+            IssueWikiBatchClaimError::SelectorMismatch { .. }
+        ));
+
+        let wrong_issue = issue_export(
+            "repo=gwild/attractor partition=ivy",
+            53,
+            issue_source_bytes(),
+        );
+        let issue_err = validate_issue_wiki_export_claim(&wrong_issue, &claim).unwrap_err();
+        assert!(matches!(
+            issue_err,
+            IssueWikiBatchClaimError::IssueSetMismatch { .. }
+        ));
+
+        let mut duplicate_issue = issue_export(
+            "repo=gwild/attractor partition=ivy",
+            52,
+            issue_source_bytes(),
+        );
+        duplicate_issue
+            .issues
+            .push(duplicate_issue.issues[0].clone());
+        let duplicate_err = validate_issue_wiki_export_claim(&duplicate_issue, &claim).unwrap_err();
+        assert!(matches!(
+            duplicate_err,
+            IssueWikiBatchClaimError::IssueSetMismatch { .. }
+        ));
+    }
+
+    #[test]
+    fn claim_ledger_rejects_overlapping_issue_claims_even_when_rekeyed() {
+        let roster = vec![IssueWikiBatchPartitionRosterEntry {
+            operator_id: "ivy".to_owned(),
+            partition_index: 0,
+        }];
+        let roster_hash = issue_wiki_batch_partition_roster_hash(&roster);
+        let mut first = IssueWikiBatchClaim {
+            operator_id: "ivy".to_owned(),
+            partition_index: 0,
+            partition_modulus: 1,
+            roster_hash: roster_hash.clone(),
+            issue_set_selector: "repo=gwild/milton partition=ivy".to_owned(),
+            issue_numbers: vec![100, 101],
+            claim_key: ContentHashHex::new("0".repeat(64)).unwrap(),
+        };
+        first.claim_key = issue_wiki_batch_claim_key(&first);
+        let mut second = IssueWikiBatchClaim {
+            operator_id: "ivy".to_owned(),
+            partition_index: 0,
+            partition_modulus: 1,
+            roster_hash: roster_hash.clone(),
+            issue_set_selector: "repo=gwild/milton partition=ivy duplicate".to_owned(),
+            issue_numbers: vec![101, 102],
+            claim_key: ContentHashHex::new("0".repeat(64)).unwrap(),
+        };
+        second.claim_key = issue_wiki_batch_claim_key(&second);
+        let mut ledger = IssueWikiBatchClaimLedger {
+            schema_id: ISSUE_WIKI_BATCH_CLAIM_LEDGER_SCHEMA_ID_V0.to_owned(),
+            wiki_origin_head: "origin-master-abc".to_owned(),
+            roster,
+            roster_hash,
+            claims: vec![first, second],
+            ledger_key: ContentHashHex::new("0".repeat(64)).unwrap(),
+        };
+        ledger.ledger_key = issue_wiki_batch_claim_ledger_key(&ledger);
+        let value = serde_json::to_value(ledger).unwrap();
+
+        let err = serde_json::from_value::<IssueWikiBatchClaimLedger>(value).unwrap_err();
+
+        assert!(err.to_string().contains("batch_claim_overlap"));
+    }
+
+    #[test]
+    fn publish_lease_key_binds_manifest_key() {
+        let mut lease = issue_wiki_publish_lease(
+            "ivy",
+            7,
+            "origin-master-abc",
+            hash_bytes(b"roster"),
+            hash_bytes(b"manifest"),
+        );
+        lease.manifest_key = hash_bytes(b"forged manifest");
+        let value = serde_json::to_value(lease).unwrap();
+
+        let err = serde_json::from_value::<IssueWikiPublishLease>(value).unwrap_err();
+
+        assert!(err.to_string().contains("publish_lease_key_mismatch"));
+    }
+
+    #[test]
+    fn leased_publish_requires_lease_for_manifest_key() {
+        let manifest = batch_manifest_fixture();
+        let manifest_json = serde_json::to_vec(&manifest).unwrap();
+        let live = TestDir::new();
+        let mut push = RecordingPush::default();
+        let roster_hash = hash_bytes(b"roster");
+        let wrong_lease = issue_wiki_publish_lease(
+            "ivy",
+            1,
+            "origin-master-abc",
+            roster_hash.clone(),
+            hash_bytes(b"wrong"),
+        );
+
+        let err = publish_issue_wiki_batch_manifest_json_with_lease(
+            live.path(),
+            &manifest_json,
+            &manifest.manifest_key,
+            &roster_hash,
+            &wrong_lease,
+            true,
+            &mut push,
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            err,
+            IssueWikiPublishError::LeaseManifestMismatch { .. }
+        ));
+        assert_eq!(push.calls, 0);
+
+        let lease = issue_wiki_publish_lease(
+            "ivy",
+            1,
+            "origin-master-abc",
+            roster_hash.clone(),
+            manifest.manifest_key.clone(),
+        );
+        let receipt = publish_issue_wiki_batch_manifest_json_with_lease(
+            live.path(),
+            &manifest_json,
+            &manifest.manifest_key,
+            &roster_hash,
+            &lease,
+            true,
+            &mut push,
+        )
+        .unwrap();
+
+        assert!(receipt.pushed);
+        assert_eq!(push.calls, 1);
+    }
+
+    #[test]
+    fn leased_publish_requires_active_roster_hash() {
+        let manifest = batch_manifest_fixture();
+        let manifest_json = serde_json::to_vec(&manifest).unwrap();
+        let live = TestDir::new();
+        let mut push = RecordingPush::default();
+        let lease = issue_wiki_publish_lease(
+            "ivy",
+            1,
+            "origin-master-abc",
+            hash_bytes(b"stale roster"),
+            manifest.manifest_key.clone(),
+        );
+
+        let err = publish_issue_wiki_batch_manifest_json_with_lease(
+            live.path(),
+            &manifest_json,
+            &manifest.manifest_key,
+            &hash_bytes(b"active roster"),
+            &lease,
+            true,
+            &mut push,
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            err,
+            IssueWikiPublishError::LeaseRosterMismatch { .. }
+        ));
+        assert_eq!(push.calls, 0);
+    }
+
+    #[test]
+    fn publish_lease_rejects_empty_holder() {
+        let mut lease = issue_wiki_publish_lease(
+            "",
+            1,
+            "origin-master-abc",
+            hash_bytes(b"roster"),
+            hash_bytes(b"manifest"),
+        );
+        lease.lease_key = issue_wiki_publish_lease_key(&lease);
+        let value = serde_json::to_value(lease).unwrap();
+
+        let err = serde_json::from_value::<IssueWikiPublishLease>(value).unwrap_err();
+
+        assert!(err.to_string().contains("publish_lease_empty_holder"));
     }
 }
