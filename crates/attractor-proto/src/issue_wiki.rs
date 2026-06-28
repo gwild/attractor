@@ -261,8 +261,7 @@ where
 
 /// Derived store mutation payload for an accepted issue-to-wiki row.
 ///
-/// This payload contains only typed derived fields and their source spans; it
-/// never carries the raw issue body.
+/// This payload contains only typed derived fields and their source spans.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IssueWikiStoreMutation {
     /// Stable wiki note identity.
@@ -271,6 +270,9 @@ pub struct IssueWikiStoreMutation {
     pub title: String,
     /// Typed reference targets with the source span that justified each one.
     pub references: Vec<IssueWikiMutationReference>,
+    /// Optional full issue text for Phase 2 wiki rendering.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub full_text: Option<SpanBoundText>,
     /// Source artifact the mutation was derived from.
     pub source_ref: String,
     /// Source hash verified immediately before mutation construction.
@@ -299,6 +301,9 @@ pub struct IssueWikiCurrentNote {
     pub title: String,
     /// Current reference targets already present on the note.
     pub references: Vec<String>,
+    /// Current rendered full text when the page carries the full-text marker.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub full_text: Option<String>,
 }
 
 /// Pinned target wiki page state used by the applier contract.
@@ -343,7 +348,7 @@ pub enum IssueWikiMutationAction {
 ///
 /// This receipt is the first consumer-facing mutation contract: it preserves the
 /// typed row's source and conformance receipts, chooses a deterministic action,
-/// and carries no raw issue body.
+/// and carries optional full text only when the full-text projector produced it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct IssueWikiMutationDryRunReceipt {
     /// Schema id this dry-run receipt used.
@@ -356,6 +361,9 @@ pub struct IssueWikiMutationDryRunReceipt {
     pub title: String,
     /// Reference targets from the accepted row.
     pub references: Vec<IssueWikiMutationReference>,
+    /// Optional full issue text for Phase 2 wiki rendering.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub full_text: Option<SpanBoundText>,
     /// Source artifact the mutation plan was derived from.
     pub source_ref: String,
     /// Source hash carried by the accepted row.
@@ -413,6 +421,9 @@ pub struct IssueWikiApplyReceipt {
     pub title: String,
     /// Reference targets from the dry-run receipt.
     pub references: Vec<IssueWikiMutationReference>,
+    /// Optional full issue text for Phase 2 wiki rendering.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub full_text: Option<SpanBoundText>,
     /// Source artifact the apply receipt was derived from.
     pub source_ref: String,
     /// Source hash carried by the dry-run receipt.
@@ -451,6 +462,7 @@ impl<'de> Deserialize<'de> for IssueWikiApplyReceipt {
             identity: receipt.identity,
             title: receipt.title,
             references: receipt.references,
+            full_text: receipt.full_text,
             source_ref: receipt.source_ref,
             source_hash: receipt.source_hash,
             conformance_receipts: receipt.conformance_receipts,
@@ -484,6 +496,8 @@ struct IssueWikiApplyReceiptWire {
     identity: String,
     title: String,
     references: Vec<IssueWikiMutationReference>,
+    #[serde(default)]
+    full_text: Option<SpanBoundText>,
     source_ref: String,
     source_hash: ContentHashHex,
     conformance_receipts: Vec<IssueWikiConformanceReceipt>,
@@ -511,6 +525,7 @@ impl<'de> Deserialize<'de> for IssueWikiMutationDryRunReceipt {
             identity: receipt.identity,
             title: receipt.title,
             references: receipt.references,
+            full_text: receipt.full_text,
             source_ref: receipt.source_ref,
             source_hash: receipt.source_hash,
             conformance_receipts: receipt.conformance_receipts,
@@ -533,6 +548,8 @@ struct IssueWikiMutationDryRunReceiptWire {
     identity: String,
     title: String,
     references: Vec<IssueWikiMutationReference>,
+    #[serde(default)]
+    full_text: Option<SpanBoundText>,
     source_ref: String,
     source_hash: ContentHashHex,
     conformance_receipts: Vec<IssueWikiConformanceReceipt>,
@@ -676,6 +693,7 @@ pub fn apply_issue_wiki_mutation_dry_run(
         identity: dry_run.identity.clone(),
         title: dry_run.title.clone(),
         references: dry_run.references.clone(),
+        full_text: dry_run.full_text.clone(),
         source_ref: dry_run.source_ref.clone(),
         source_hash: dry_run.source_hash.clone(),
         conformance_receipts: dry_run.conformance_receipts.clone(),
@@ -817,6 +835,7 @@ impl IssueWikiAccepted {
                     span: reference.span.clone(),
                 })
                 .collect(),
+            full_text: self.note.full_text.clone(),
             source_ref: self.source.source_ref.clone(),
             source_hash: self.source.source_hash.clone(),
             transform_id: self.envelope.transform_id.clone(),
@@ -840,6 +859,10 @@ impl IssueWikiAccepted {
             .map_err(|reason| IssueWikiProjectionError::ConformanceMismatch { reason })?;
         let mutation = self.to_store_mutation(&self.source.source_hash)?;
         let planned_reference_targets = reference_targets(&mutation);
+        let planned_full_text = mutation
+            .full_text
+            .as_ref()
+            .map(|full_text| full_text.value.as_str());
         let action = match current_note {
             None => IssueWikiMutationAction::Create,
             Some(note) if note.identity != mutation.identity => IssueWikiMutationAction::Conflict,
@@ -847,7 +870,11 @@ impl IssueWikiAccepted {
                 if note.title == mutation.title
                     && note.references.as_slice() == planned_reference_targets.as_slice() =>
             {
-                IssueWikiMutationAction::Noop
+                if note.full_text.as_deref() == planned_full_text {
+                    IssueWikiMutationAction::Noop
+                } else {
+                    IssueWikiMutationAction::Update
+                }
             }
             Some(_) => IssueWikiMutationAction::Update,
         };
@@ -864,6 +891,7 @@ impl IssueWikiAccepted {
             identity: mutation.identity,
             title: mutation.title,
             references: mutation.references,
+            full_text: mutation.full_text,
             source_ref: mutation.source_ref,
             source_hash: mutation.source_hash,
             conformance_receipts: self.conformance_receipts.clone(),
@@ -986,6 +1014,7 @@ impl IssueWikiApplyReceipt {
             identity: self.identity.clone(),
             title: self.title.clone(),
             references: self.references.clone(),
+            full_text: self.full_text.clone(),
             source_ref: self.source_ref.clone(),
             source_hash: self.source_hash.clone(),
             conformance_receipts: self.conformance_receipts.clone(),
@@ -1071,6 +1100,10 @@ fn issue_wiki_mutation_idempotency_key(receipt: &IssueWikiMutationDryRunReceipt)
         hash_part(&mut hasher, reference.target.as_bytes());
         hash_span(&mut hasher, &reference.span);
     }
+    if let Some(full_text) = &receipt.full_text {
+        hash_part(&mut hasher, full_text.value.as_bytes());
+        hash_span(&mut hasher, &full_text.span);
+    }
     hash_part(&mut hasher, receipt.source_ref.as_bytes());
     hash_part(&mut hasher, receipt.source_hash.as_str().as_bytes());
     for conformance in &receipt.conformance_receipts {
@@ -1096,6 +1129,10 @@ fn issue_wiki_apply_key(receipt: &IssueWikiApplyReceipt) -> ContentHashHex {
     for reference in &receipt.references {
         hash_part(&mut hasher, reference.target.as_bytes());
         hash_span(&mut hasher, &reference.span);
+    }
+    if let Some(full_text) = &receipt.full_text {
+        hash_part(&mut hasher, full_text.value.as_bytes());
+        hash_span(&mut hasher, &full_text.span);
     }
     hash_part(&mut hasher, receipt.source_ref.as_bytes());
     hash_part(&mut hasher, receipt.source_hash.as_str().as_bytes());
@@ -1391,6 +1428,7 @@ mod tests {
             }]
         );
         assert_eq!(mutation.source_hash, row.source.source_hash);
+        assert!(mutation.full_text.is_none());
         assert_eq!(mutation.source_spans.len(), 4);
     }
 
@@ -1482,6 +1520,7 @@ mod tests {
                 .iter()
                 .map(|reference| reference.target.clone())
                 .collect(),
+            full_text: None,
         };
         let projection = IssueWikiProjectionResult::Accepted(Box::new(row));
         let dry_run = plan_issue_wiki_mutation(&projection, Some(&current)).unwrap();
@@ -1624,6 +1663,7 @@ mod tests {
                 .iter()
                 .map(|reference| reference.target.clone())
                 .collect(),
+            full_text: None,
         };
         let projection = IssueWikiProjectionResult::Accepted(Box::new(row));
 
@@ -1641,6 +1681,7 @@ mod tests {
             identity: row.note.identity.value.clone(),
             title: "Old title".to_owned(),
             references: vec![],
+            full_text: None,
         };
         let projection = IssueWikiProjectionResult::Accepted(Box::new(row));
 
@@ -1662,6 +1703,7 @@ mod tests {
                 .iter()
                 .map(|reference| reference.target.clone())
                 .collect(),
+            full_text: None,
         };
         let projection = IssueWikiProjectionResult::Accepted(Box::new(row));
 
