@@ -631,6 +631,7 @@ impl IssueWikiBatchRunReceipt {
         if self.publish_receipt.projection_schema_digest != self.manifest.projection_schema_digest {
             return Err("issue_wiki batch_run_projection_digest_mismatch".to_owned());
         }
+        self.validate_manifest_is_publishable()?;
         self.validate_publish_entries_match_manifest()?;
         let expected_status = if self.publish_receipt.pushed {
             IssueWikiBatchRunStatus::Published
@@ -642,6 +643,23 @@ impl IssueWikiBatchRunReceipt {
                 "issue_wiki batch_run_status_mismatch expected={} actual={}",
                 expected_status.as_str(),
                 self.status.as_str()
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_manifest_is_publishable(&self) -> Result<(), String> {
+        if let Some(entry) = self.manifest.entries.iter().find(|entry| {
+            !matches!(
+                entry.status,
+                IssueWikiBatchStatus::Written | IssueWikiBatchStatus::Noop
+            )
+        }) {
+            return Err(format!(
+                "issue_wiki batch_run_non_publishable_manifest source_ref={} status={} reason={}",
+                entry.source_ref,
+                entry.status.as_str(),
+                entry.reason.as_deref().unwrap_or("none")
             ));
         }
         Ok(())
@@ -3452,6 +3470,47 @@ reference: wiki:Attractor/Batch-Migration-Manifest\n"
         let err = serde_json::from_value::<IssueWikiBatchRunReceipt>(value).unwrap_err();
 
         assert!(err.to_string().contains("batch_run_selector_mismatch"));
+    }
+
+    #[test]
+    fn batch_run_receipt_rejects_non_publishable_manifest_even_when_rekeyed_noop() {
+        let staging = TestDir::new();
+        let mut export = issue_export("repo=gwild/attractor issue=52", 52, issue_source_bytes());
+        export.issues[0].source.source_hash = hash_bytes(b"stale declared hash");
+        let manifest = materialize_issue_wiki_batch_manifest(staging.path(), &export).unwrap();
+        assert_eq!(manifest.entries[0].status, IssueWikiBatchStatus::Stale);
+        let mut publish_receipt = IssueWikiPublishReceipt {
+            schema_id: ISSUE_WIKI_PUBLISH_RECEIPT_SCHEMA_ID_V0.to_owned(),
+            manifest_key: manifest.manifest_key.clone(),
+            projection_schema_digest: manifest.projection_schema_digest.clone(),
+            pre_tree_hash: hash_bytes(b"empty tree"),
+            post_tree_hash: hash_bytes(b"empty tree"),
+            entries: Vec::new(),
+            pushed: false,
+            publish_key: ContentHashHex::new("0".repeat(64))
+                .expect("zero placeholder is valid lowercase hex"),
+        };
+        publish_receipt.publish_key = issue_wiki_publish_key(&publish_receipt);
+        let mut receipt = IssueWikiBatchRunReceipt {
+            schema_id: ISSUE_WIKI_BATCH_RUN_RECEIPT_SCHEMA_ID_V0.to_owned(),
+            issue_export_hash: manifest.issue_export_hash.clone(),
+            issue_set_selector: manifest.issue_set_selector.clone(),
+            manifest_key: manifest.manifest_key.clone(),
+            publish_key: publish_receipt.publish_key.clone(),
+            status: IssueWikiBatchRunStatus::Noop,
+            manifest,
+            publish_receipt,
+            run_key: ContentHashHex::new("0".repeat(64))
+                .expect("zero placeholder is valid lowercase hex"),
+        };
+        receipt.run_key = issue_wiki_batch_run_key(&receipt);
+        let value = serde_json::to_value(receipt).unwrap();
+
+        let err = serde_json::from_value::<IssueWikiBatchRunReceipt>(value).unwrap_err();
+
+        assert!(err
+            .to_string()
+            .contains("batch_run_non_publishable_manifest"));
     }
 
     #[test]
