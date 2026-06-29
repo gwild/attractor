@@ -1,0 +1,261 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Attractor References</title>
+  <style>
+:root{color-scheme:light dark;--bg:#0f172a;--panel:#111827;--text:#e5e7eb;--muted:#a7b0c0;--accent:#7dd3fc;--border:#334155;--code:#020617} @media(prefers-color-scheme:light){:root{--bg:#f8fafc;--panel:#fff;--text:#0f172a;--muted:#475569;--accent:#0369a1;--border:#cbd5e1;--code:#f1f5f9}}*{box-sizing:border-box}body{margin:0;font-family:ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;line-height:1.6;background:radial-gradient(circle at top left,rgba(125,211,252,.16),transparent 34rem),var(--bg);color:var(--text)}header,main,footer{max-width:1080px;margin:0 auto;padding:2rem 1.25rem}header{padding-top:4rem}.eyebrow{color:var(--accent);font-weight:700;text-transform:uppercase;letter-spacing:.12em;font-size:.8rem}h1{font-size:clamp(2.2rem,6vw,4.5rem);line-height:1;margin:.35rem 0 1rem}h2{margin-top:2.4rem}p,li{color:var(--text)}.lede{color:var(--muted);font-size:1.15rem;max-width:820px}nav{position:sticky;top:0;background:color-mix(in srgb,var(--bg) 90%,transparent);border-bottom:1px solid var(--border);backdrop-filter:blur(10px);z-index:2}nav .inner{max-width:1080px;margin:0 auto;padding:.75rem 1.25rem;display:flex;gap:.75rem;flex-wrap:wrap}nav a{color:var(--accent);font-weight:700;text-decoration:none}section,.card{background:color-mix(in srgb,var(--panel) 82%,transparent);border:1px solid var(--border);border-radius:18px;padding:1rem 1.2rem;margin:1rem 0}table{width:100%;border-collapse:collapse;margin:1rem 0;display:block;overflow-x:auto}th,td{border:1px solid var(--border);padding:.65rem;text-align:left;vertical-align:top}th{color:var(--accent)}code,pre{background:var(--code);border:1px solid var(--border);border-radius:10px}code{padding:.1rem .3rem}pre{padding:1rem;overflow:auto}a{color:var(--accent)}blockquote{border-left:4px solid var(--accent);padding-left:1rem;color:var(--muted)}footer{color:var(--muted);font-size:.9rem}
+</style>
+</head>
+<body>
+<nav><div class="inner"><a href="Attractor-Overview.html">Overview</a><a href="Attractor-vs-GraphDB.html">vs GraphDB</a><a href="Attractor-Use-Cases.html">Use Cases</a><a href="Attractor-References.html">References</a></div></nav>
+<header>
+  <div class="eyebrow">Attractor Knowledge Base</div>
+  <h1>Attractor References</h1>
+  <p class="lede">Attractor should be framed as a synthesis of established ideas, not as a claim that Milton invented a new storage primitive. This page groups the literature by what part of the construction it supports.</p>
+</header>
+<main>
+  <section class="card">
+    <strong>Render receipt:</strong>
+    source_commit=dd96a4a0eb739513593ed0b65fca6f0a1e076760; source_path=Attractor-References.md; source_sha256=e264628b109edc91dadaa3ed64a2c595b6f014a5b53eca7a127d067ecd498b39; projector_version=mel-static-html-v0.1; target=pages-html
+  </section>
+  <h1 id="attractor-references">Attractor References</h1>
+<p>Attractor should be framed as a synthesis of established ideas, not as a claim that Milton invented a new storage primitive. This page groups the literature by what part of the construction it supports.</p>
+<h2 id="how-to-read-this-page">How To Read This Page</h2>
+<table>
+<thead>
+<tr>
+<th>Category</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Core anchor</td>
+<td>Stable primary source or standard that supports a core Attractor mechanism.</td>
+</tr>
+<tr>
+<td>Design analogue</td>
+<td>Related system or research direction that resembles part of the Attractor workflow.</td>
+</tr>
+<tr>
+<td>Boundary note</td>
+<td>Where the analogy stops, so the wiki does not overclaim.</td>
+</tr>
+</tbody>
+</table>
+<h2 id="core-anchors">Core Anchors</h2>
+<table>
+<thead>
+<tr>
+<th>Attractor Piece</th>
+<th>Source</th>
+<th>Supports</th>
+<th>Boundary Note</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Content-addressed value identity</td>
+<td>Juan Benet, “IPFS - Content Addressed, Versioned, P2P File System,” arXiv:1407.3561</td>
+<td>Merkle DAGs, content-addressed blocks, hash-derived identity.</td>
+<td>Attractor is not IPFS; it borrows content-addressing and DAG vocabulary.</td>
+</tr>
+<tr>
+<td>Provenance model</td>
+<td>W3C PROV-DM, “The PROV Data Model”</td>
+<td>Entities, activities, agents, and provenance relations.</td>
+<td>PROV is a model; Attractor adds Milton-specific receipts and projection gates.</td>
+</tr>
+<tr>
+<td>Provenance-bearing graph assertions</td>
+<td>Carroll, Bizer, Hayes, Stickler, “Named Graphs, Provenance and Trust,” WWW 2005</td>
+<td>Graph assertions with source context and trust metadata.</td>
+<td>Named graphs do not by themselves enforce Attractor’s append-only receipt chain.</td>
+</tr>
+<tr>
+<td>Tamper-evident logs</td>
+<td>Crosby and Wallach, “Efficient Data Structures for Tamper-Evident Logging,” USENIX Security 2009</td>
+<td>Append-only log integrity, inclusion checks, consistency checks, auditor threat model.</td>
+<td>The guarantee depends on an honest persisted head or external checkpoint.</td>
+</tr>
+<tr>
+<td>Deployed Merkle log pattern</td>
+<td>RFC 9162, “Certificate Transparency Version 2.0”</td>
+<td>Signed tree heads, inclusion proofs, consistency proofs.</td>
+<td>CT is a public certificate-log system; Attractor is a local knowledge substrate.</td>
+</tr>
+<tr>
+<td>CRDT-style convergence</td>
+<td>Shapiro, Preguiça, Baquero, Zawirski, “Conflict-Free Replicated Data Types,” SSS 2011</td>
+<td>Idempotent, commutative, order-independent convergence for value sets.</td>
+<td>Applies only to Attractor’s value-set layer; the provenance chain is ordered and not a CRDT.</td>
+</tr>
+<tr>
+<td>Event log and projections</td>
+<td>Martin Fowler, “Event Sourcing”; Microsoft Azure Architecture Center, “Event Sourcing pattern”</td>
+<td>Append-only event history and derived read models/projections.</td>
+<td>Event sourcing does not imply content addressing or source-span receipts.</td>
+</tr>
+<tr>
+<td>Verifiable linked artifacts</td>
+<td>Kuhn and Dumontier, “Trusty URIs: Verifiable, Immutable, and Permanent Digital Artifacts for Linked Data,” ESWC 2014</td>
+<td>Hash-bound identifiers for verifiable artifacts.</td>
+<td>Trusty URIs identify artifacts; Attractor also manages promotion, review, and receipts.</td>
+</tr>
+</tbody>
+</table>
+<h2 id="design-analogues">Design Analogues</h2>
+<table>
+<thead>
+<tr>
+<th>Area</th>
+<th>Sources To Track</th>
+<th>Why It Matters</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Nanopublications</td>
+<td>Nanopublication literature and tooling.</td>
+<td>Small citable assertions with provenance and publication metadata resemble Attractor claim nodes.</td>
+</tr>
+<tr>
+<td>Whyis / provenance-supported knowledge graphs</td>
+<td>Whyis knowledge-graph framework papers and docs.</td>
+<td>Shows practical provenance-aware knowledge graph workflows.</td>
+</tr>
+<tr>
+<td>Agent memory graphs</td>
+<td>A-MEM, Portable Agent Memory, Graphiti-style temporal/episodic KG systems.</td>
+<td>Useful analogues for linked agent memory, but not the foundation unless verified against the deployed design.</td>
+</tr>
+<tr>
+<td>Knowledge graph traceability</td>
+<td>Full-traceability and provenance work for knowledge graphs.</td>
+<td>Helps explain update history, source lineage, and auditability.</td>
+</tr>
+<tr>
+<td>Static-site projection</td>
+<td>GitHub Pages, Jekyll, Mermaid-aware renderers.</td>
+<td>Supports the two-projector model: wiki Markdown and polished generated HTML from the same source.</td>
+</tr>
+</tbody>
+</table>
+<h2 id="claim-map">Claim Map</h2>
+<table>
+<thead>
+<tr>
+<th>Claim On Wiki Page</th>
+<th>Minimum Citation Set</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>“Attractor uses content-addressed values.”</td>
+<td>IPFS paper or Merkle-DAG source.</td>
+</tr>
+<tr>
+<td>“Attractor records provenance as first-class data.”</td>
+<td>W3C PROV-DM plus Named Graphs.</td>
+</tr>
+<tr>
+<td>“Attractor has tamper-evident append-only receipts.”</td>
+<td>Crosby-Wallach plus RFC 9162.</td>
+</tr>
+<tr>
+<td>“Attractor converges equivalent value nodes.”</td>
+<td>Shapiro et al. CRDT, with value-layer-only caveat.</td>
+</tr>
+<tr>
+<td>“Attractor emits projections/read models.”</td>
+<td>Event Sourcing sources.</td>
+</tr>
+<tr>
+<td>“Attractor supports citable knowledge artifacts.”</td>
+<td>Trusty URIs, nanopublications, Whyis.</td>
+</tr>
+</tbody>
+</table>
+<h2 id="boundary-language-for-the-wiki">Boundary Language For The Wiki</h2>
+<p>Use this phrasing when explaining novelty:</p>
+<blockquote>
+<p>Attractor is a Milton-specific composition of established patterns: content-addressed values, provenance-bearing graph assertions, an append-only tamper-evident receipt log, CRDT-style convergence for the value set, and generated projections for wiki/HTML/query surfaces.</p>
+</blockquote>
+<p>Avoid these overclaims:</p>
+<ul>
+<li>“Attractor invented content-addressed storage.”</li>
+<li>“Attractor is a CRDT.”</li>
+<li>“Attractor is a blockchain.”</li>
+<li>“Attractor proves truth.”</li>
+<li>“Attractor replaces graph databases.”</li>
+</ul>
+<h2 id="stable-links">Stable Links</h2>
+<table>
+<thead>
+<tr>
+<th>Source</th>
+<th>Link</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>IPFS paper</td>
+<td>https://arxiv.org/abs/1407.3561</td>
+</tr>
+<tr>
+<td>W3C PROV-DM</td>
+<td>https://www.w3.org/TR/prov-dm/</td>
+</tr>
+<tr>
+<td>Named Graphs, Provenance and Trust</td>
+<td>https://www.w3.org/2004/03/trix/</td>
+</tr>
+<tr>
+<td>Crosby-Wallach tamper-evident logging paper</td>
+<td>https://www.usenix.org/conference/18th-usenix-security-symposium/efficient-data-structures-tamper-evident-logging</td>
+</tr>
+<tr>
+<td>RFC 9162 Certificate Transparency v2</td>
+<td>https://www.rfc-editor.org/rfc/rfc9162</td>
+</tr>
+<tr>
+<td>Shapiro et al. CRDT paper</td>
+<td>https://inria.hal.science/inria-00609399</td>
+</tr>
+<tr>
+<td>Martin Fowler Event Sourcing</td>
+<td>https://martinfowler.com/eaaDev/EventSourcing.html</td>
+</tr>
+<tr>
+<td>Microsoft Event Sourcing pattern</td>
+<td>https://learn.microsoft.com/azure/architecture/patterns/event-sourcing</td>
+</tr>
+<tr>
+<td>Trusty URIs</td>
+<td>https://trustyuri.net/</td>
+</tr>
+<tr>
+<td>Nanopublications</td>
+<td>https://nanopub.net/</td>
+</tr>
+<tr>
+<td>Whyis</td>
+<td>https://whyis.readthedocs.io/</td>
+</tr>
+</tbody>
+</table>
+<h2 id="related-pages">Related Pages</h2>
+<ul>
+<li>[[Attractor Overview]]</li>
+<li>[[Attractor vs GraphDB]]</li>
+<li>[[Attractor Use Cases]]</li>
+<li>[[Research/Agent-Native-Research-Artifacts]]</li>
+<li>[[Research/LLM-Observability-and-Traceability]]</li>
+<li>[[Home]]</li>
+</ul>
+</main>
+<footer>Generated from Markdown source for the Milton wiki. Do not hand-edit this HTML without updating the source receipt.</footer>
+</body>
+</html>

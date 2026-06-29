@@ -1,0 +1,243 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Attractor Use Cases</title>
+  <style>
+:root{color-scheme:light dark;--bg:#0f172a;--panel:#111827;--text:#e5e7eb;--muted:#a7b0c0;--accent:#7dd3fc;--border:#334155;--code:#020617} @media(prefers-color-scheme:light){:root{--bg:#f8fafc;--panel:#fff;--text:#0f172a;--muted:#475569;--accent:#0369a1;--border:#cbd5e1;--code:#f1f5f9}}*{box-sizing:border-box}body{margin:0;font-family:ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;line-height:1.6;background:radial-gradient(circle at top left,rgba(125,211,252,.16),transparent 34rem),var(--bg);color:var(--text)}header,main,footer{max-width:1080px;margin:0 auto;padding:2rem 1.25rem}header{padding-top:4rem}.eyebrow{color:var(--accent);font-weight:700;text-transform:uppercase;letter-spacing:.12em;font-size:.8rem}h1{font-size:clamp(2.2rem,6vw,4.5rem);line-height:1;margin:.35rem 0 1rem}h2{margin-top:2.4rem}p,li{color:var(--text)}.lede{color:var(--muted);font-size:1.15rem;max-width:820px}nav{position:sticky;top:0;background:color-mix(in srgb,var(--bg) 90%,transparent);border-bottom:1px solid var(--border);backdrop-filter:blur(10px);z-index:2}nav .inner{max-width:1080px;margin:0 auto;padding:.75rem 1.25rem;display:flex;gap:.75rem;flex-wrap:wrap}nav a{color:var(--accent);font-weight:700;text-decoration:none}section,.card{background:color-mix(in srgb,var(--panel) 82%,transparent);border:1px solid var(--border);border-radius:18px;padding:1rem 1.2rem;margin:1rem 0}table{width:100%;border-collapse:collapse;margin:1rem 0;display:block;overflow-x:auto}th,td{border:1px solid var(--border);padding:.65rem;text-align:left;vertical-align:top}th{color:var(--accent)}code,pre{background:var(--code);border:1px solid var(--border);border-radius:10px}code{padding:.1rem .3rem}pre{padding:1rem;overflow:auto}a{color:var(--accent)}blockquote{border-left:4px solid var(--accent);padding-left:1rem;color:var(--muted)}footer{color:var(--muted);font-size:.9rem}
+</style>
+</head>
+<body>
+<nav><div class="inner"><a href="Attractor-Overview.html">Overview</a><a href="Attractor-vs-GraphDB.html">vs GraphDB</a><a href="Attractor-Use-Cases.html">Use Cases</a><a href="Attractor-References.html">References</a></div></nav>
+<header>
+  <div class="eyebrow">Attractor Knowledge Base</div>
+  <h1>Attractor Use Cases</h1>
+  <p class="lede">Attractor should start narrow: produce reviewable, receipt-backed manifests for Milton’s wiki and issue cleanup work. After that path is proven, the same substrate can support chat backfill, PR-review memory, incident forensics, handoff search, and research synthesis.</p>
+</header>
+<main>
+  <section class="card">
+    <strong>Render receipt:</strong>
+    source_commit=dd96a4a0eb739513593ed0b65fca6f0a1e076760; source_path=Attractor-Use-Cases.md; source_sha256=79d0fa3902de03ce6038442d1be96c9c15252d1f650d0a5ce8b57da59618d35a; projector_version=mel-static-html-v0.1; target=pages-html
+  </section>
+  <h1 id="attractor-use-cases">Attractor Use Cases</h1>
+<p>Attractor should start narrow: produce reviewable, receipt-backed manifests for Milton’s wiki and issue cleanup work. After that path is proven, the same substrate can support chat backfill, PR-review memory, incident forensics, handoff search, and research synthesis.</p>
+<h2 id="first-use-case-wiki-cleanup">First Use Case: Wiki Cleanup</h2>
+<p>The immediate use case is a read-only audit of the Milton wiki. The goal is not to let an agent rewrite the wiki blindly. The goal is to give reviewers a manifest that says what should move, merge, split, summarize, or retire — with receipts.</p>
+<table>
+<thead>
+<tr>
+<th>Manifest Field</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>page</code></td>
+<td>Current wiki page path.</td>
+</tr>
+<tr>
+<td><code>canonical_path</code></td>
+<td>Proposed stable destination after taxonomy cleanup.</td>
+</tr>
+<tr>
+<td><code>category</code></td>
+<td>Proposed top-level category.</td>
+</tr>
+<tr>
+<td><code>source_issue</code></td>
+<td>GitHub issue or discussion that produced durable content.</td>
+</tr>
+<tr>
+<td><code>source_receipt_digest</code></td>
+<td>Digest tying the proposal to exact source bytes.</td>
+</tr>
+<tr>
+<td><code>related_chat_refs</code></td>
+<td>Chat spans that support or explain the page.</td>
+</tr>
+<tr>
+<td><code>topic_aliases</code></td>
+<td>Reviewed aliases for backfill searches.</td>
+</tr>
+<tr>
+<td><code>duplicate_of</code></td>
+<td>Canonical target if this page duplicates another.</td>
+</tr>
+<tr>
+<td><code>missing_summary</code></td>
+<td>Source material exists but has not been summarized.</td>
+</tr>
+<tr>
+<td><code>claim_status</code></td>
+<td>Evidence-only, proposed, promoted, rejected, or needs-review.</td>
+</tr>
+<tr>
+<td><code>proposed_action</code></td>
+<td>Move, merge, split, summarize, leave alone, or retire.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="acceptance-bar">Acceptance Bar</h3>
+<p>A wiki cleanup proposal is ready only when each proposed action can answer:</p>
+<ul>
+<li>what source bytes support the action;</li>
+<li>which projector produced the proposal;</li>
+<li>what commit and source snapshot were used;</li>
+<li>whether another agent independently saw the same relationship;</li>
+<li>what should happen if the source is later corrected.</li>
+</ul>
+<h2 id="chat-backfill">Chat Backfill</h2>
+<p>Team chat contains decisions that never became durable documentation. Attractor can backfill chat into candidates without pretending chat is already canonical.</p>
+<table>
+<thead>
+<tr>
+<th>Step</th>
+<th>Output</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Select reviewed aliases for a topic.</td>
+<td>Query plan with expected yield.</td>
+</tr>
+<tr>
+<td>Rehydrate messages from archive snapshots.</td>
+<td>Source spans and message receipts.</td>
+</tr>
+<tr>
+<td>Project candidate claims.</td>
+<td>Evidence-only claim nodes.</td>
+</tr>
+<tr>
+<td>Link to existing pages/issues.</td>
+<td>Proposed relations.</td>
+</tr>
+<tr>
+<td>Human review.</td>
+<td>Promoted summary or rejected candidate.</td>
+</tr>
+</tbody>
+</table>
+<p>The rule is simple: chat can suggest knowledge, but only reviewed projections can promote it.</p>
+<h2 id="pr-review-memory">PR Review Memory</h2>
+<p>PR review often repeats the same reasoning: proof rows must match head SHA, predicted impact must match the diff, Windows-native paths differ from WSL, and direct mentions need head-bound review markers. Attractor can remember those patterns as evidence-backed review rules.</p>
+<p>Useful outputs:</p>
+<ul>
+<li>recurring blocker taxonomy;</li>
+<li>review checklist suggestions bound to changed paths;</li>
+<li>examples of past failures with source PRs;</li>
+<li>head-bound review receipt history;</li>
+<li>“this looks like prior issue X” links.</li>
+</ul>
+<p>This should assist reviewers, not auto-approve code.</p>
+<h2 id="incident-forensics">Incident Forensics</h2>
+<p>When a service fails, evidence is scattered across chat, logs, commits, dashboards, and manual commands. Attractor can connect those artifacts into an incident graph.</p>
+<table>
+<thead>
+<tr>
+<th>Artifact</th>
+<th>Relation</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Alert message</td>
+<td><code>incident -&gt; first_seen</code></td>
+</tr>
+<tr>
+<td>Command output</td>
+<td><code>incident -&gt; diagnostic_receipt</code></td>
+</tr>
+<tr>
+<td>Fix PR</td>
+<td><code>incident -&gt; remediation</code></td>
+</tr>
+<tr>
+<td>Post-merge verification</td>
+<td><code>remediation -&gt; live_proof</code></td>
+</tr>
+<tr>
+<td>Follow-up issue</td>
+<td><code>incident -&gt; prevention_task</code></td>
+</tr>
+</tbody>
+</table>
+<p>The resulting page can explain what happened without losing the proof trail.</p>
+<h2 id="agent-handoff-and-search">Agent Handoff And Search</h2>
+<p>Agent handoff files are local and intentionally small. Attractor can help search durable history around a handoff without turning handoff notes into global state.</p>
+<p>Examples:</p>
+<ul>
+<li>“show the latest receipts for PR #3095”;</li>
+<li>“find all wiki pages touched by the Attractor cleanup”;</li>
+<li>“which issues mention proof-row staleness?”;</li>
+<li>“which chat decisions produced this rule?”</li>
+</ul>
+<h2 id="research-synthesis">Research Synthesis</h2>
+<p>Research threads benefit from the same pattern: sources stay separate from claims, summaries carry citations, and generated pages show what evidence supports each section.</p>
+<p>Attractor can produce:</p>
+<ul>
+<li>annotated bibliographies grouped by claim;</li>
+<li>“core anchors vs analogues” sections;</li>
+<li>source reliability labels;</li>
+<li>unsupported-claim reports;</li>
+<li>update receipts when a source set changes.</li>
+</ul>
+<h2 id="non-goals">Non-Goals</h2>
+<ul>
+<li>No blind wiki rewriting.</li>
+<li>No promotion from raw chat without source spans.</li>
+<li>No claim of social truth from content hashes alone.</li>
+<li>No replacement for human review of summaries.</li>
+<li>No query database before the evidence contract is working.</li>
+</ul>
+<h2 id="roadmap">Roadmap</h2>
+<table>
+<thead>
+<tr>
+<th>Phase</th>
+<th>Deliverable</th>
+<th>Merge Gate</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>Wiki audit manifest for existing pages.</td>
+<td>Manifest reviewed; no page moves yet.</td>
+</tr>
+<tr>
+<td>2</td>
+<td>Duplicate and missing-summary report.</td>
+<td>Source spans rehydrate from bound snapshots.</td>
+</tr>
+<tr>
+<td>3</td>
+<td>Reviewed wiki moves and summaries.</td>
+<td>Redirects preserved; receipts attached.</td>
+</tr>
+<tr>
+<td>4</td>
+<td>HTML and graph projections.</td>
+<td>Generated from same Markdown/manifests.</td>
+</tr>
+<tr>
+<td>5</td>
+<td>Chat/PR/incident backfill.</td>
+<td>Promotion rules proven on wiki cleanup first.</td>
+</tr>
+</tbody>
+</table>
+<h2 id="related-pages">Related Pages</h2>
+<ul>
+<li>[[Attractor Overview]]</li>
+<li>[[Attractor vs GraphDB]]</li>
+<li>[[Attractor References]]</li>
+<li>[[Operations/Knowledge-Base-Migration-and-Convergence]]</li>
+<li>[[Operations/LLM-Observability-and-Receipts]]</li>
+<li>[[Home]]</li>
+</ul>
+</main>
+<footer>Generated from Markdown source for the Milton wiki. Do not hand-edit this HTML without updating the source receipt.</footer>
+</body>
+</html>
