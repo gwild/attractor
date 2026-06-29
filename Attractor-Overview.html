@@ -35,166 +35,348 @@
       }
     }
     * { box-sizing: border-box; }
-    body {
-      margin: 0;
-      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      line-height: 1.6;
-      background: radial-gradient(circle at top left, rgba(125, 211, 252, .18), transparent 34rem), var(--bg);
-      color: var(--text);
-    }
-    header {
-      padding: 4rem 1.25rem 2rem;
-      border-bottom: 1px solid var(--border);
-    }
+    body { margin: 0; font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; line-height: 1.6; background: radial-gradient(circle at top left, rgba(125, 211, 252, .18), transparent 34rem), var(--bg); color: var(--text); }
+    header { padding: 4rem 1.25rem 2rem; border-bottom: 1px solid var(--border); }
     .wrap { max-width: 1080px; margin: 0 auto; }
     .eyebrow { color: var(--accent); font-weight: 700; text-transform: uppercase; letter-spacing: .12em; font-size: .8rem; }
     h1 { font-size: clamp(2.3rem, 7vw, 4.8rem); line-height: .98; margin: .4rem 0 1rem; }
     h2 { margin-top: 2.4rem; font-size: 1.6rem; }
     h3 { margin-top: 1.6rem; }
     .lede { max-width: 820px; font-size: 1.2rem; color: var(--muted); }
-    nav {
-      position: sticky;
-      top: 0;
-      z-index: 3;
-      background: color-mix(in srgb, var(--bg) 88%, transparent);
-      backdrop-filter: blur(10px);
-      border-bottom: 1px solid var(--border);
-    }
+    nav { position: sticky; top: 0; z-index: 3; background: color-mix(in srgb, var(--bg) 88%, transparent); backdrop-filter: blur(10px); border-bottom: 1px solid var(--border); }
     nav .wrap { display: flex; gap: .5rem; flex-wrap: wrap; padding: .75rem 1.25rem; }
-    nav a {
-      color: var(--text);
-      text-decoration: none;
-      border: 1px solid var(--border);
-      padding: .45rem .7rem;
-      border-radius: 999px;
-      font-size: .9rem;
-    }
+    nav a { color: var(--text); text-decoration: none; border: 1px solid var(--border); padding: .45rem .7rem; border-radius: 999px; font-size: .9rem; }
     nav a:hover { border-color: var(--accent); color: var(--accent); }
     main { padding: 1rem 1.25rem 4rem; }
-    section {
-      background: color-mix(in srgb, var(--panel) 92%, transparent);
-      border: 1px solid var(--border);
-      border-radius: 1rem;
-      padding: 1.25rem;
-      margin: 1rem 0;
-      box-shadow: 0 24px 60px rgba(0,0,0,.18);
-    }
-    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 1rem; }
-    .card { background: var(--panel-2); border: 1px solid var(--border); border-radius: .85rem; padding: 1rem; }
-    .card strong { color: var(--accent); }
-    table { width: 100%; border-collapse: collapse; overflow: hidden; border-radius: .7rem; }
+    section { background: color-mix(in srgb, var(--panel) 92%, transparent); border: 1px solid var(--border); border-radius: 1rem; padding: 1.25rem; margin: 1rem 0; box-shadow: 0 24px 60px rgba(0,0,0,.18); }
+    table { width: 100%; border-collapse: collapse; overflow: hidden; border-radius: .7rem; margin: 1rem 0; }
     th, td { border: 1px solid var(--border); padding: .75rem; vertical-align: top; }
     th { background: var(--panel-2); text-align: left; color: var(--accent); }
     code { background: var(--code); border: 1px solid var(--border); border-radius: .35rem; padding: .1rem .3rem; font-size: .92em; }
-    .callout { border-left: 4px solid var(--warn); background: color-mix(in srgb, var(--panel-2) 82%, transparent); padding: 1rem; border-radius: .75rem; }
-    .pipeline { display: flex; flex-wrap: wrap; align-items: center; gap: .6rem; margin: 1rem 0; }
-    .step { border: 1px solid var(--border); border-radius: .7rem; padding: .7rem .9rem; background: var(--panel-2); }
-    .arrow { color: var(--accent-2); font-weight: 900; }
+    pre { overflow-x: auto; background: var(--code); border: 1px solid var(--border); border-radius: .75rem; padding: 1rem; }
+    pre code { border: 0; padding: 0; background: transparent; }
+    blockquote { margin: 1rem 0; border-left: 4px solid var(--accent); background: color-mix(in srgb, var(--panel-2) 82%, transparent); padding: .75rem 1rem; border-radius: .75rem; color: var(--muted); }
+    a { color: var(--accent); }
     footer { color: var(--muted); font-size: .9rem; padding: 2rem 1.25rem; border-top: 1px solid var(--border); }
-  </style>
+</style>
 </head>
 <body>
   <header>
     <div class="wrap">
-      <div class="eyebrow">Milton Knowledge Base</div>
+      <div class="eyebrow">General Attractor Knowledge Base</div>
       <h1>Attractor Overview</h1>
-      <p class="lede"><strong>Attractor is Milton's receipt-first, content-addressed provenance substrate for multi-agent knowledge work.</strong> It turns evidence into auditable claims, emits reviewable manifests, and lets the wiki stay human-readable without becoming the trust anchor.</p>
+      <p class="lede">Attractor is a receipt-first, content-addressed provenance substrate for turning scattered evidence into reviewable knowledge. It is designed for teams, agents, research groups, and operational systems that need to know not just what a claim says, but exactly what source bytes produced it, which projector promoted it, and whether the result can be replayed.</p>
     </div>
   </header>
-  <nav aria-label="Page sections">
-    <div class="wrap">
-      <a href="#why">Why</a>
-      <a href="#concepts">Core concepts</a>
-      <a href="#wiki-cleanup">Wiki cleanup</a>
-      <a href="#threat-model">Threat model</a>
-      <a href="#graphdb">GraphDB</a>
-      <a href="#rule">Practical rule</a>
-    </div>
+  <nav aria-label="Attractor pages">
+    <div class="wrap"><a href="Attractor-Overview.html">Overview</a><a href="Attractor-vs-GraphDB.html">Attractor vs GraphDB</a><a href="Attractor-Use-Cases.html">Use Cases</a><a href="Attractor-References.html">References</a></div>
   </nav>
   <main class="wrap">
-    <section id="why">
-      <h2>Why Attractor Exists</h2>
-      <p>Milton has many agents, hosts, issues, PRs, chat channels, and wiki pages. The hard problem is not only storing facts. The hard problem is knowing which claims came from which source bytes, which agent or process promoted them, whether another agent can reproduce the result, and whether a later cleanup changed meaning or only presentation.</p>
-      <div class="grid">
-        <div class="card"><strong>Evidence stays evidence</strong><br>Raw issue, wiki, PR, and chat material is not canonical until a typed projector promotes it.</div>
-        <div class="card"><strong>Identity converges</strong><br>Content-derived identity makes duplicate values converge instead of multiplying silently.</div>
-        <div class="card"><strong>Provenance is first-class</strong><br>Source spans and receipts are part of the data model, not a footer convention.</div>
-        <div class="card"><strong>Output is reviewable</strong><br>Wiki pages, HTML, and audit manifests are projections humans can inspect before publish.</div>
-      </div>
-    </section>
+    <section><p>Attractor is a receipt-first, content-addressed provenance substrate for turning scattered evidence into reviewable knowledge. It is designed for teams, agents, research groups, and operational systems that need to know not just what a claim says, but exactly what source bytes produced it, which projector promoted it, and whether the result can be replayed.</p>
+<p>Attractor is best understood as a synthesis of established patterns: content addressing, provenance graphs, tamper-evident append logs, CRDT-style convergence for value sets, and knowledge-graph projection. The construction is opinionated around one principle: generated knowledge should carry its receipts.</p>
+</section>
+<section id="why-it-exists">
+<h2>Why It Exists</h2>
+<p>Most knowledge systems preserve final prose better than they preserve evidence. Wikis, issue trackers, chats, documents, logs, tickets, test runs, and review comments all contain useful claims, but they drift apart over time. A cleanup or summary may be correct, stale, duplicated, or unsupported, and normal document tools rarely make that difference falsifiable.</p>
+<p>Attractor exists to make the workflow auditable:</p>
+<ul>
+<li>evidence stays evidence until a typed projector promotes it;</li>
+<li>identical content-derived values converge instead of multiplying silently;</li>
+<li>provenance is first-class, not an optional note;</li>
+<li>receipts make later verification possible;</li>
+<li>wiki, HTML, graph, and dashboard outputs are projections, not the trust anchor.</li>
+</ul>
+</section>
+<section id="architecture-at-a-glance">
+<h2>Architecture At A Glance</h2>
+<pre><code class="language-mermaid">flowchart LR
+    A[Documents\nMarkdown, pages, files] --&gt; P[Projector\nextract typed evidence]
+    B[Issues, tickets, PRs\nAPI receipts] --&gt; P
+    C[Chat or email archives\nmessage spans] --&gt; P
+    D[Run receipts\ncommands, checks, logs] --&gt; P
 
-    <section id="concepts">
-      <h2>Core Concepts</h2>
-      <table>
-        <thead><tr><th>Concept</th><th>Meaning in Attractor</th></tr></thead>
-        <tbody>
-          <tr><td>Cell / value node</td><td>A content-addressed unit of evidence or derived data.</td></tr>
-          <tr><td>Provenance</td><td>The source issue, wiki page, chat span, PR, command, or run that produced a value.</td></tr>
-          <tr><td>Projector</td><td>A typed boundary that turns raw evidence into structured claims and emits a receipt.</td></tr>
-          <tr><td>Relation</td><td>A typed edge such as <code>page -&gt; source_issue</code>, <code>claim -&gt; source_span</code>, or <code>page -&gt; duplicate_of</code>.</td></tr>
-          <tr><td>Receipt</td><td>A reproducible record of inputs, projector version, output hashes, and validation status.</td></tr>
-          <tr><td>Manifest</td><td>A reviewable output such as <code>wiki-audit.jsonl</code>, taxonomy maps, duplicate reports, or HTML navigation data.</td></tr>
-        </tbody>
-      </table>
-    </section>
-
-    <section id="wiki-cleanup">
-      <h2>What It Does For The Wiki Cleanup</h2>
-      <div class="pipeline" aria-label="Attractor workflow">
-        <div class="step">Wiki / Issues / Chat snapshot</div><div class="arrow">→</div>
-        <div class="step">Projector + resolver</div><div class="arrow">→</div>
-        <div class="step">Cells + relations + receipts</div><div class="arrow">→</div>
-        <div class="step">Audit manifest</div><div class="arrow">→</div>
-        <div class="step">Reviewed HTML / wiki output</div>
-      </div>
-      <ol>
-        <li><strong>Inventory</strong> wiki pages, issue sources, and later chat archive snapshots.</li>
-        <li><strong>Map identity</strong> from old page names to canonical topic IDs and redirects.</li>
-        <li><strong>Detect cleanup targets</strong> such as duplicates, orphan pages, missing summaries, stale categories, and unreviewed chat-derived claims.</li>
-        <li><strong>Bind sources</strong> with issue snapshot hashes and chat span receipts.</li>
-        <li><strong>Emit manifests</strong> for human review before any wiki rewrite.</li>
-        <li><strong>Generate HTML navigation</strong> from reviewed taxonomy data so presentation cannot drift from canonical content.</li>
-      </ol>
-      <h3>Current cleanup pilot bindings</h3>
-      <ul>
-        <li><code>wiki_remote=git@github.com:gwild/milton.wiki.git</code></li>
-        <li><code>wiki_ref=master@8dfd5ee310c16294ebf78ea9395a6b02c93034f8</code></li>
-        <li><code>issue_snapshot=sha256:4b36747d4790e6e092e3326338fae7c68a1dd7509067783321fa0fa7144c1248</code> over 365 records</li>
-      </ul>
-      <p>Chat archive material is not yet bound. Promotion of chat-derived claims should wait for an immutable archive receipt and exact span references.</p>
-    </section>
-
-    <section id="threat-model">
-      <h2>Threat Model</h2>
-      <div class="callout">
-        <p><strong>Attractor gives tamper-evident provenance against rewrite, reorder, truncation, or appended forgery given an honest externally persisted head or receipt.</strong> It does not magically prevent a coordinated rewrite of both the chain and the trusted head. Content addressing proves value identity; receipts and externally pinned heads make later verification possible. The trust boundary must be named in every published workflow.</p>
-      </div>
-    </section>
-
-    <section id="graphdb">
-      <h2>Relationship To Graph Databases</h2>
-      <p>A graph database is a general query and traversal substrate. Attractor is a convergence and trust substrate. They compose: Attractor can produce a verified graph snapshot that a graph database later indexes for ad-hoc traversal. But the first requirement for Milton is receipts, provenance, and reproducibility; the query layer comes after the evidence layer.</p>
-      <ul>
-        <li><strong>GraphDB answers:</strong> what is connected to what?</li>
-        <li><strong>Attractor answers:</strong> what claim was derived from what bytes, through what projector, with what receipt?</li>
-      </ul>
-    </section>
-
-    <section id="rule">
-      <h2>Practical Rule</h2>
-      <p>If a future agent cannot answer <em>“what exact bytes produced this claim, through what projector, at what version, with what receipt?”</em> then the claim is not ready to become canonical wiki knowledge.</p>
-      <h3>Non-goals</h3>
-      <ul>
-        <li>Attractor is not the canonical wiki editor.</li>
-        <li>Attractor is not a free-text scraper that promotes uncited claims.</li>
-        <li>Attractor is not a magic immutable ledger without an honest head.</li>
-        <li>Attractor is not a generic replacement for all graph databases.</li>
-        <li>Attractor should not write wiki pages blindly; it should emit reviewable manifests and receipts first.</li>
-      </ul>
-    </section>
+    P --&gt; R[Resolver\nlinks, aliases, targets]
+    R --&gt; S[Attractor store\ncontent-addressed values\nreceipt multisets]
+    S --&gt; Q[Queries\nrelations, missing summaries, duplicates]
+    Q --&gt; M[Reviewable manifests]
+    M --&gt; W[Markdown / wiki]
+    M --&gt; H[Static HTML projection]
+    M --&gt; G[Graph export / query API]
+</code></pre>
+</section>
+<section id="core-model">
+<h2>Core Model</h2>
+<p>Attractor has three working layers:</p>
+<table>
+<thead>
+<tr>
+<th>Layer</th>
+<th>What It Does</th>
+<th>Closest Prior Art</th>
+<th>Important Boundary</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Convergent value layer</td>
+<td>Hashes content values so identical values converge to one node.</td>
+<td>Content-addressed storage, Merkle DAGs, grow-only CRDT sets.</td>
+<td>CRDT-style applies to the value set only: idempotent and order-independent.</td>
+</tr>
+<tr>
+<td>Ordered provenance layer</td>
+<td>Records each observation as an append-only receipt chain.</td>
+<td>Event sourcing, tamper-evident logs, Certificate Transparency-style consistency.</td>
+<td>Not a CRDT: the receipt chain is ordered, single-head, and order-sensitive.</td>
+</tr>
+<tr>
+<td>Projection layer</td>
+<td>Emits reviewable manifests, Markdown, HTML indexes, graph exports, and API snapshots.</td>
+<td>Knowledge graphs, RDF/provenance models, static-site projection.</td>
+<td>Generated outputs are read models; reviewed source remains the human editing surface.</td>
+</tr>
+</tbody>
+</table>
+<p>The result is a graph where evidence can converge without losing history.</p>
+</section>
+<section id="core-concepts">
+<h2>Core Concepts</h2>
+<table>
+<thead>
+<tr>
+<th>Concept</th>
+<th>Meaning In Attractor</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Cell / value node</td>
+<td>A content-addressed unit of evidence or derived data.</td>
+</tr>
+<tr>
+<td>Provenance</td>
+<td>The source page, issue, chat span, ticket, command, file, or run that produced a value.</td>
+</tr>
+<tr>
+<td>Projector</td>
+<td>A typed boundary that turns raw evidence into structured claims and emits a receipt.</td>
+</tr>
+<tr>
+<td>Relation</td>
+<td>A typed edge such as <code>page -&gt; source_issue</code>, <code>claim -&gt; source_span</code>, or <code>page -&gt; duplicate_of</code>.</td>
+</tr>
+<tr>
+<td>Receipt</td>
+<td>A reproducible record of inputs, projector version, output hashes, validation status, and target commit or URL.</td>
+</tr>
+<tr>
+<td>Manifest</td>
+<td>A reviewable output such as an audit file, taxonomy map, duplicate report, or HTML navigation dataset.</td>
+</tr>
+</tbody>
+</table>
+</section>
+<section id="worked-micro-example">
+<h2>Worked Micro-Example</h2>
+<p>Suppose the same durable claim appears in a ticket comment and a chat archive:</p>
+<blockquote>
+<p>Renamed documentation pages must preserve redirects.</p>
+</blockquote>
+<p>Attractor stores one content-addressed value for that sentence and attaches two provenance entries:</p>
+<pre><code class="language-text">value: blake3(&quot;Renamed documentation pages must preserve redirects.&quot;)
+provenance:
+  - ticket #1234 comment A span 10-18
+  - chat:#docs msg C span 4-12
+</code></pre>
+<p>A generic graph database might store two rows, or one row with provenance added by application convention. Attractor makes the convergence and provenance behavior part of the contract: one value, complete source multiset.</p>
+</section>
+<section id="general-workflow">
+<h2>General Workflow</h2>
+<p>For a knowledge-base cleanup, research synthesis, compliance evidence set, or incident report, Attractor should begin with a read-only audit manifest:</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>artifact</code></td>
+<td>Current document, ticket, page, message span, or record.</td>
+</tr>
+<tr>
+<td><code>canonical_path</code></td>
+<td>Proposed stable location or identifier after cleanup.</td>
+</tr>
+<tr>
+<td><code>category</code></td>
+<td>Proposed top-level category or domain.</td>
+</tr>
+<tr>
+<td><code>source_ref</code></td>
+<td>Source issue, ticket, document, dataset, or archive reference.</td>
+</tr>
+<tr>
+<td><code>source_receipt_digest</code></td>
+<td>Frozen digest tying the proposal to exact source evidence.</td>
+</tr>
+<tr>
+<td><code>related_refs</code></td>
+<td>Rehydratable spans that support claims or context.</td>
+</tr>
+<tr>
+<td><code>topic_aliases[]</code></td>
+<td>Reviewed aliases for secondary discovery, with measured yield.</td>
+</tr>
+<tr>
+<td><code>duplicate_of</code></td>
+<td>Canonical target when this artifact duplicates another artifact.</td>
+</tr>
+<tr>
+<td><code>missing_summary</code></td>
+<td>Source material exists but is not summarized yet.</td>
+</tr>
+<tr>
+<td><code>claim_status</code></td>
+<td>Evidence-only, proposed, promoted, rejected, or needs-review.</td>
+</tr>
+<tr>
+<td><code>proposed_action</code></td>
+<td>Move, merge, split, summarize, leave alone, or retire.</td>
+</tr>
+</tbody>
+</table>
+<p>Only after that manifest is reviewed should projectors move, merge, or publish summaries.</p>
+</section>
+<section id="example-milton-issue-migration">
+<h2>Example: Milton Issue Migration</h2>
+<p>Milton's issue and wiki migration is a concrete Attractor use case, not the only use case. The batch source can be pinned to a frozen GitHub issue snapshot and a wiki commit, then projected into audit manifests and public pages with readback receipts. That example shows the general pattern:</p>
+<ol>
+<li>freeze the source universe;</li>
+<li>compute digests for exact source bytes;</li>
+<li>project candidate pages, duplicates, and missing summaries;</li>
+<li>review the manifest before changing durable documentation;</li>
+<li>publish Markdown and HTML with source and projector receipts.</li>
+</ol>
+<p>The same pattern applies to any team that needs reproducible knowledge-base cleanup.</p>
+</section>
+<section id="markdown-and-html-projection">
+<h2>Markdown And HTML Projection</h2>
+<p>Attractor supports human-authored source; it does not replace authorship. A common deployment uses Markdown as the canonical editing surface and HTML as a polished projection.</p>
+<table>
+<thead>
+<tr>
+<th>Output</th>
+<th>Source</th>
+<th>Target</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Markdown pages</td>
+<td>Reviewed source Markdown and manifests.</td>
+<td>Wiki, docs folder, or repository documentation.</td>
+</tr>
+<tr>
+<td>Polished HTML</td>
+<td>Same reviewed source and manifests.</td>
+<td>Static site such as GitHub Pages.</td>
+</tr>
+<tr>
+<td>Audit reports</td>
+<td>Attractor receipts and projector outputs.</td>
+<td>PR-reviewed manifests or audit pages.</td>
+</tr>
+<tr>
+<td>Graph query views</td>
+<td>Content-addressed values and relations.</td>
+<td>API/query surface, not hand-authored prose.</td>
+</tr>
+</tbody>
+</table>
+<p>Each render should carry a generated receipt:</p>
+<table>
+<thead>
+<tr>
+<th>Receipt Field</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>source_commit</code></td>
+<td>Git commit of the source.</td>
+</tr>
+<tr>
+<td><code>source_path</code></td>
+<td>Source path.</td>
+</tr>
+<tr>
+<td><code>source_sha256</code></td>
+<td>Hash of the exact source bytes.</td>
+</tr>
+<tr>
+<td><code>projector_version</code></td>
+<td>Version or commit of the render projector.</td>
+</tr>
+<tr>
+<td><code>target</code></td>
+<td><code>wiki</code>, <code>pages</code>, <code>manifest</code>, or another declared output target.</td>
+</tr>
+<tr>
+<td><code>target_commit</code> / <code>target_url</code></td>
+<td>Where the rendered output landed.</td>
+</tr>
+</tbody>
+</table>
+</section>
+<section id="threat-model">
+<h2>Threat Model</h2>
+<p>Attractor gives tamper-evident provenance against rewrite, reorder, truncation, or appended forgery given an honest externally persisted head or receipt. It does not prevent a coordinated rewrite of both the chain and the trusted head.</p>
+<p>Content addressing proves value identity. It does not prove social truth. Claims become canonical only after their source spans are rehydratable from the snapshot and reviewers promote them.</p>
+</section>
+<section id="relationship-to-graph-databases">
+<h2>Relationship To Graph Databases</h2>
+<p>A graph database is a general query and traversal substrate. Attractor is a convergence and trust substrate. They compose: Attractor can produce a verified graph snapshot that a graph database later indexes for ad-hoc traversal. The receipt and provenance layer comes first; the query layer comes after the evidence layer.</p>
+</section>
+<section id="non-goals">
+<h2>Non-Goals</h2>
+<ul>
+<li>Attractor is not the canonical editor for every document.</li>
+<li>Attractor is not a free-text scraper that promotes uncited claims.</li>
+<li>Attractor is not a magic immutable ledger without an honest head.</li>
+<li>Attractor is not a generic replacement for all graph databases.</li>
+<li>Attractor should not publish changes blindly; it should emit reviewable manifests and receipts first.</li>
+</ul>
+</section>
+<section id="practical-rule">
+<h2>Practical Rule</h2>
+<p>If a future reviewer cannot answer "what exact bytes produced this claim, through what projector, at what version, with what receipt?" then the claim is not ready to become canonical knowledge.</p>
+</section>
+<section id="related-work">
+<h2>Related Work</h2>
+<p>Attractor's components map to known literature:</p>
+<ul>
+<li>IPFS / Merkle DAGs: content-addressed blocks and links.</li>
+<li>W3C PROV: entity, activity, and agent provenance.</li>
+<li>Named graphs and provenance-aware knowledge graphs: graph assertions with source context.</li>
+<li>CRDTs: convergent value-set behavior.</li>
+<li>Crosby-Wallach and Certificate Transparency: tamper-evident logs and honest-head threat model.</li>
+<li>Trusty URIs and nanopublication-style work: verifiable linked artifacts.</li>
+<li>Agent-memory research: portable, provenance-bearing memory.</li>
+</ul>
+</section>
+<section id="related-pages">
+<h2>Related Pages</h2>
+<ul>
+<li>[[Attractor vs GraphDB]] - comparison with generic graph databases.</li>
+<li>[[Attractor Use Cases]] - general workflows and the Milton migration example.</li>
+<li>[[Attractor References]] - literature and standards behind the construction.</li>
+</ul></section>
   </main>
   <footer>
-    <div class="wrap">Canonical Markdown source: <code>Attractor-Overview.md</code>. HTML is a presentation artifact for the Milton wiki.</div>
+    <div class="wrap">Source: <code>Attractor-Overview.md</code> sha256 <code>95cfec0bddc7f84f8ede4dde5dcf75d54dce7393a16b47c87e79fbaff5e7dbd0</code>. HTML is a generated Pages projection; Markdown is the canonical source.</div>
   </footer>
 </body>
 </html>

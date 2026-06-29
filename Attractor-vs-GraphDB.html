@@ -5,25 +5,78 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Attractor vs GraphDB</title>
   <style>
-:root{color-scheme:light dark;--bg:#0f172a;--panel:#111827;--text:#e5e7eb;--muted:#a7b0c0;--accent:#7dd3fc;--border:#334155;--code:#020617} @media(prefers-color-scheme:light){:root{--bg:#f8fafc;--panel:#fff;--text:#0f172a;--muted:#475569;--accent:#0369a1;--border:#cbd5e1;--code:#f1f5f9}}*{box-sizing:border-box}body{margin:0;font-family:ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;line-height:1.6;background:radial-gradient(circle at top left,rgba(125,211,252,.16),transparent 34rem),var(--bg);color:var(--text)}header,main,footer{max-width:1080px;margin:0 auto;padding:2rem 1.25rem}header{padding-top:4rem}.eyebrow{color:var(--accent);font-weight:700;text-transform:uppercase;letter-spacing:.12em;font-size:.8rem}h1{font-size:clamp(2.2rem,6vw,4.5rem);line-height:1;margin:.35rem 0 1rem}h2{margin-top:2.4rem}p,li{color:var(--text)}.lede{color:var(--muted);font-size:1.15rem;max-width:820px}nav{position:sticky;top:0;background:color-mix(in srgb,var(--bg) 90%,transparent);border-bottom:1px solid var(--border);backdrop-filter:blur(10px);z-index:2}nav .inner{max-width:1080px;margin:0 auto;padding:.75rem 1.25rem;display:flex;gap:.75rem;flex-wrap:wrap}nav a{color:var(--accent);font-weight:700;text-decoration:none}section,.card{background:color-mix(in srgb,var(--panel) 82%,transparent);border:1px solid var(--border);border-radius:18px;padding:1rem 1.2rem;margin:1rem 0}table{width:100%;border-collapse:collapse;margin:1rem 0;display:block;overflow-x:auto}th,td{border:1px solid var(--border);padding:.65rem;text-align:left;vertical-align:top}th{color:var(--accent)}code,pre{background:var(--code);border:1px solid var(--border);border-radius:10px}code{padding:.1rem .3rem}pre{padding:1rem;overflow:auto}a{color:var(--accent)}blockquote{border-left:4px solid var(--accent);padding-left:1rem;color:var(--muted)}footer{color:var(--muted);font-size:.9rem}
+    :root {
+      color-scheme: light dark;
+      --bg: #0f172a;
+      --panel: #111827;
+      --panel-2: #1f2937;
+      --text: #e5e7eb;
+      --muted: #a7b0c0;
+      --accent: #7dd3fc;
+      --accent-2: #a78bfa;
+      --border: #334155;
+      --good: #86efac;
+      --warn: #fcd34d;
+      --code: #020617;
+    }
+    @media (prefers-color-scheme: light) {
+      :root {
+        --bg: #f8fafc;
+        --panel: #ffffff;
+        --panel-2: #eef2ff;
+        --text: #0f172a;
+        --muted: #475569;
+        --accent: #0369a1;
+        --accent-2: #6d28d9;
+        --border: #cbd5e1;
+        --good: #166534;
+        --warn: #92400e;
+        --code: #f1f5f9;
+      }
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; line-height: 1.6; background: radial-gradient(circle at top left, rgba(125, 211, 252, .18), transparent 34rem), var(--bg); color: var(--text); }
+    header { padding: 4rem 1.25rem 2rem; border-bottom: 1px solid var(--border); }
+    .wrap { max-width: 1080px; margin: 0 auto; }
+    .eyebrow { color: var(--accent); font-weight: 700; text-transform: uppercase; letter-spacing: .12em; font-size: .8rem; }
+    h1 { font-size: clamp(2.3rem, 7vw, 4.8rem); line-height: .98; margin: .4rem 0 1rem; }
+    h2 { margin-top: 2.4rem; font-size: 1.6rem; }
+    h3 { margin-top: 1.6rem; }
+    .lede { max-width: 820px; font-size: 1.2rem; color: var(--muted); }
+    nav { position: sticky; top: 0; z-index: 3; background: color-mix(in srgb, var(--bg) 88%, transparent); backdrop-filter: blur(10px); border-bottom: 1px solid var(--border); }
+    nav .wrap { display: flex; gap: .5rem; flex-wrap: wrap; padding: .75rem 1.25rem; }
+    nav a { color: var(--text); text-decoration: none; border: 1px solid var(--border); padding: .45rem .7rem; border-radius: 999px; font-size: .9rem; }
+    nav a:hover { border-color: var(--accent); color: var(--accent); }
+    main { padding: 1rem 1.25rem 4rem; }
+    section { background: color-mix(in srgb, var(--panel) 92%, transparent); border: 1px solid var(--border); border-radius: 1rem; padding: 1.25rem; margin: 1rem 0; box-shadow: 0 24px 60px rgba(0,0,0,.18); }
+    table { width: 100%; border-collapse: collapse; overflow: hidden; border-radius: .7rem; margin: 1rem 0; }
+    th, td { border: 1px solid var(--border); padding: .75rem; vertical-align: top; }
+    th { background: var(--panel-2); text-align: left; color: var(--accent); }
+    code { background: var(--code); border: 1px solid var(--border); border-radius: .35rem; padding: .1rem .3rem; font-size: .92em; }
+    pre { overflow-x: auto; background: var(--code); border: 1px solid var(--border); border-radius: .75rem; padding: 1rem; }
+    pre code { border: 0; padding: 0; background: transparent; }
+    blockquote { margin: 1rem 0; border-left: 4px solid var(--accent); background: color-mix(in srgb, var(--panel-2) 82%, transparent); padding: .75rem 1rem; border-radius: .75rem; color: var(--muted); }
+    a { color: var(--accent); }
+    footer { color: var(--muted); font-size: .9rem; padding: 2rem 1.25rem; border-top: 1px solid var(--border); }
 </style>
 </head>
 <body>
-<nav><div class="inner"><a href="Attractor-Overview.html">Overview</a><a href="Attractor-vs-GraphDB.html">vs GraphDB</a><a href="Attractor-Use-Cases.html">Use Cases</a><a href="Attractor-References.html">References</a></div></nav>
-<header>
-  <div class="eyebrow">Attractor Knowledge Base</div>
-  <h1>Attractor vs GraphDB</h1>
-  <p class="lede">Attractor is not a replacement for graph databases. It is a receipt-first convergence and provenance layer that can feed a graph database when Milton needs richer traversal, visualization, or query performance.</p>
-</header>
-<main>
-  <section class="card">
-    <strong>Render receipt:</strong>
-    source_commit=dd96a4a0eb739513593ed0b65fca6f0a1e076760; source_path=Attractor-vs-GraphDB.md; source_sha256=d58db18a25883ca83fcc33a5e456783d980bb3bd65118f5ae32493e11f32300e; projector_version=mel-static-html-v0.1; target=pages-html
-  </section>
-  <h1 id="attractor-vs-graphdb">Attractor vs GraphDB</h1>
-<p>Attractor is not a replacement for graph databases. It is a receipt-first convergence and provenance layer that can feed a graph database when Milton needs richer traversal, visualization, or query performance.</p>
-<p>The short version: a graph database answers “what is connected to what?” Attractor answers “what exact evidence produced this claim, did equivalent values converge, and can we replay the projection that promoted it?”</p>
-<h2 id="comparison">Comparison</h2>
+  <header>
+    <div class="wrap">
+      <div class="eyebrow">General Attractor Knowledge Base</div>
+      <h1>Attractor vs GraphDB</h1>
+      <p class="lede">Attractor is not a replacement for graph databases. It is a receipt-first convergence and provenance layer that can feed a graph database when a project needs richer traversal, visualization, or query performance.</p>
+    </div>
+  </header>
+  <nav aria-label="Attractor pages">
+    <div class="wrap"><a href="Attractor-Overview.html">Overview</a><a href="Attractor-vs-GraphDB.html">Attractor vs GraphDB</a><a href="Attractor-Use-Cases.html">Use Cases</a><a href="Attractor-References.html">References</a></div>
+  </nav>
+  <main class="wrap">
+    <section><p>Attractor is not a replacement for graph databases. It is a receipt-first convergence and provenance layer that can feed a graph database when a project needs richer traversal, visualization, or query performance.</p>
+<p>The short version: a graph database answers "what is connected to what?" Attractor answers "what exact evidence produced this claim, did equivalent values converge, and can we replay the projection that promoted it?"</p>
+</section>
+<section id="comparison">
+<h2>Comparison</h2>
 <table>
 <thead>
 <tr>
@@ -70,18 +123,20 @@
 </tr>
 <tr>
 <td>Read path</td>
-<td>Emits reviewable manifests, wiki pages, HTML, exports, and query snapshots.</td>
+<td>Emits reviewable manifests, Markdown, HTML, exports, and query snapshots.</td>
 <td>Query language and graph traversals are first-class.</td>
 </tr>
 <tr>
 <td>Best first use</td>
-<td>Wiki cleanup, source receipts, duplicate detection, claim promotion.</td>
+<td>Source receipts, duplicate detection, claim promotion, audit manifests.</td>
 <td>Exploratory graph queries, path finding, dashboards, recommendations.</td>
 </tr>
 </tbody>
 </table>
-<h2 id="why-not-just-use-neo4j-rdf-or-another-graph-store">Why Not Just Use Neo4j, RDF, Or Another Graph Store?</h2>
-<p>Milton’s first failure mode is not “we cannot traverse edges.” The first failure mode is drift: pages, chat, issues, run logs, and PR reviews all contain overlapping claims with unclear source boundaries. A graph database can represent the result, but it does not by itself enforce the receipt contract that makes the result trustworthy.</p>
+</section>
+<section id="why-not-just-use-neo4j-rdf-or-another-graph-store">
+<h2>Why Not Just Use Neo4j, RDF, Or Another Graph Store?</h2>
+<p>Many organizations do not first fail because they cannot traverse edges. They fail because documents, chats, tickets, logs, and reviews contain overlapping claims with unclear source boundaries. A graph database can represent the result, but it does not by itself enforce the receipt contract that makes the result trustworthy.</p>
 <p>Attractor should therefore sit before the query database:</p>
 <ol>
 <li>ingest evidence snapshots;</li>
@@ -91,8 +146,10 @@
 <li>emit a reviewed graph snapshot;</li>
 <li>optionally load that snapshot into a graph database.</li>
 </ol>
-<h2 id="duplicate-content-example">Duplicate Content Example</h2>
-<p>Two agents may write the same durable claim in different places:</p>
+</section>
+<section id="duplicate-content-example">
+<h2>Duplicate Content Example</h2>
+<p>Two people or agents may write the same durable claim in different places:</p>
 <table>
 <thead>
 <tr>
@@ -102,25 +159,27 @@
 </thead>
 <tbody>
 <tr>
-<td>Issue comment</td>
-<td><code>The wiki cleanup must preserve redirects for renamed pages.</code></td>
+<td>Ticket comment</td>
+<td><code>Renamed documentation pages must preserve redirects.</code></td>
 </tr>
 <tr>
 <td>Chat message</td>
-<td><code>The wiki cleanup must preserve redirects for renamed pages.</code></td>
+<td><code>Renamed documentation pages must preserve redirects.</code></td>
 </tr>
 </tbody>
 </table>
 <p>A generic graph database might store two <code>Claim</code> nodes unless the application deduplicates them. Attractor stores one value and two provenance entries:</p>
-<pre><code class="language-text">value_id = blake3(&quot;The wiki cleanup must preserve redirects for renamed pages.&quot;)
+<pre><code class="language-text">value_id = blake3(&quot;Renamed documentation pages must preserve redirects.&quot;)
 provenance = [
-  issue:1234#comment-9 span 14-22,
-  chat:#attractor:msg-32807fa9 span 1-1
+  ticket:1234#comment-9 span 14-22,
+  chat:#docs:msg-32807fa9 span 1-1
 ]
 </code></pre>
-<p>That distinction matters when a wiki editor later asks whether a statement is independently supported, copied from one source, or stale.</p>
-<h2 id="projection-boundary">Projection Boundary</h2>
-<p>Attractor’s most important boundary is the projector:</p>
+<p>That distinction matters when an editor later asks whether a statement is independently supported, copied from one source, or stale.</p>
+</section>
+<section id="projection-boundary">
+<h2>Projection Boundary</h2>
+<p>Attractor's most important boundary is the projector:</p>
 <table>
 <thead>
 <tr>
@@ -136,13 +195,13 @@ provenance = [
 <td>Candidate claim, not canonical prose.</td>
 </tr>
 <tr>
-<td>GitHub issue</td>
-<td>Issue/comment ID, API receipt, source span.</td>
-<td>Claim or task relation.</td>
+<td>Issue or ticket</td>
+<td>Item/comment ID, API receipt, source span.</td>
+<td>Claim, task relation, or migration candidate.</td>
 </tr>
 <tr>
-<td>Wiki page</td>
-<td>Wiki commit, path, byte hash, heading/span.</td>
+<td>Document page</td>
+<td>Commit, path, byte hash, heading/span.</td>
 <td>Page relation, duplicate signal, or missing-summary signal.</td>
 </tr>
 <tr>
@@ -150,30 +209,45 @@ provenance = [
 <td>Command, cwd, commit, exit code, output digest.</td>
 <td>Validation receipt.</td>
 </tr>
+<tr>
+<td>Dataset row</td>
+<td>Dataset snapshot, row ID, schema version, cell span or digest.</td>
+<td>Structured evidence node.</td>
+</tr>
 </tbody>
 </table>
 <p>The projector must fail closed when it cannot produce source-span receipts. A graph database can store the output, but the projector is what prevents unsupported prose from becoming knowledge.</p>
-<h2 id="when-a-graph-database-still-helps">When A Graph Database Still Helps</h2>
+</section>
+<section id="when-a-graph-database-still-helps">
+<h2>When A Graph Database Still Helps</h2>
 <p>A graph database becomes useful after Attractor has produced a verified snapshot. Good follow-on uses include:</p>
 <ul>
-<li>traversing page-to-issue-to-chat evidence paths;</li>
+<li>traversing document-to-ticket-to-chat evidence paths;</li>
 <li>finding clusters of duplicate or near-duplicate pages;</li>
-<li>visualizing agent ownership and review paths;</li>
-<li>answering “what pages are blocked by this issue?”;</li>
+<li>visualizing ownership and review paths;</li>
+<li>answering "what pages are blocked by this issue?";</li>
 <li>ranking missing summaries by source density;</li>
 <li>powering dashboards and search facets.</li>
 </ul>
-<h2 id="practical-rule">Practical Rule</h2>
+</section>
+<section id="example-milton-migration">
+<h2>Example: Milton Migration</h2>
+<p>In the Milton issue migration, Attractor-style receipts bind migrated wiki pages back to exact GitHub issue snapshots and wiki commits. A graph database could later query the resulting page, issue, and chat relations, but Attractor's load-bearing role is proving how each migrated claim or page was produced.</p>
+</section>
+<section id="practical-rule">
+<h2>Practical Rule</h2>
 <p>Use Attractor to decide what the graph means and why it is trusted. Use a graph database to query a verified graph once that meaning is established.</p>
-<h2 id="related-pages">Related Pages</h2>
+</section>
+<section id="related-pages">
+<h2>Related Pages</h2>
 <ul>
 <li>[[Attractor Overview]]</li>
 <li>[[Attractor Use Cases]]</li>
 <li>[[Attractor References]]</li>
-<li>[[Subsystems/Attractor|Attractor]]</li>
-<li>[[Home]]</li>
-</ul>
-</main>
-<footer>Generated from Markdown source for the Milton wiki. Do not hand-edit this HTML without updating the source receipt.</footer>
+</ul></section>
+  </main>
+  <footer>
+    <div class="wrap">Source: <code>Attractor-vs-GraphDB.md</code> sha256 <code>3a409c23807b45ae27e382b4d456d9a55b3276abfdb6af918c4f7e471a171822</code>. HTML is a generated Pages projection; Markdown is the canonical source.</div>
+  </footer>
 </body>
 </html>
