@@ -27,6 +27,12 @@ Description=Attractor matrix daemon (docker)
 # Fail loud if the docker daemon is unreachable (replaces the unusable
 # system-unit dependency above).
 ExecStartPre=/usr/bin/docker version
+# Rebuild the runtime image if a docker prune removed it, so an image cleanup
+# can never leave the bare-name `docker run` below falling back to a Docker Hub
+# pull that crash-loops (homer, 2026-09-23). Instant no-op when the image is
+# present; the slow rebuild path runs only after a prune — TimeoutStartSec
+# below covers a from-scratch release build.
+ExecStartPre=/bin/bash -c '/usr/bin/docker image inspect attractor-run:latest >/dev/null 2>&1 || /usr/bin/docker build -f %h/attractor/docker/Dockerfile.run -t attractor-run:latest %h/attractor'
 # Remove a stale container from an unclean stop. `docker inspect` exits 1
 # for BOTH container-absent and real errors (daemon, permissions), so only
 # stderr distinguishes them: the not-found case is matched explicitly and
@@ -43,6 +49,9 @@ ExecStart=/usr/bin/docker run --name attractor --rm --init \
 ExecStop=/usr/bin/docker stop attractor
 Restart=on-failure
 RestartSec=5
+# A from-scratch Rust release build (post-prune recovery in the build-if-missing
+# ExecStartPre above) far exceeds the 90s default; allow it to finish.
+TimeoutStartSec=3600
 
 [Install]
 WantedBy=default.target
