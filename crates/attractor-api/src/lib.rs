@@ -23,8 +23,8 @@ use std::path::{Path, PathBuf};
 use attractor_core::ContentHash;
 #[cfg(feature = "store")]
 use attractor_proto::{
-    ContentHashHex, E2eReceipt, GetData, InsertData, LinkData, ProvenanceRef, RelationsData,
-    SnapshotData,
+    ContentHashHex, E2eReceipt, GetData, InsertData, LinkData, NodeHeatData, ProvenanceRef,
+    RelationsData, SnapshotData, WeightedLinkData, WeightedRelationsData,
 };
 #[cfg(feature = "store")]
 use attractor_store::{Node, Store, StoreError};
@@ -98,7 +98,8 @@ pub fn dispatch(req: &ApiRequest, uptime_secs: u64) -> ApiResponse {
         | RequestKind::Insert { .. }
         | RequestKind::Link { .. }
         | RequestKind::Snapshot
-        | RequestKind::Relations { .. } => {
+        | RequestKind::Relations { .. }
+        | RequestKind::WeightedRelations { .. } => {
             if cfg!(feature = "store") {
                 ApiResponse::error(
                     "matrix verb requires dispatch_with_store — rebuild daemon with store feature",
@@ -233,6 +234,33 @@ pub fn dispatch_with_store(req: &ApiRequest, uptime_secs: u64, store: &mut Store
                         from: hash_hex(&e.from),
                         to: hash_hex(&e.to),
                         kind: e.kind,
+                    })
+                    .collect(),
+            }),
+            Err(e) => ApiResponse::error(format!("invalid content address: {e}")),
+        },
+        RequestKind::WeightedRelations { address } => match hash_core(address) {
+            Ok(addr) => ApiResponse::ok(WeightedRelationsData {
+                edges: store
+                    .weighted_relations(&addr)
+                    .into_iter()
+                    .map(|rel| WeightedLinkData {
+                        from: hash_hex(&rel.edge.from),
+                        to: hash_hex(&rel.edge.to),
+                        kind: rel.edge.kind,
+                        from_heat: NodeHeatData {
+                            address: hash_hex(&rel.from_heat.address),
+                            degree: rel.from_heat.degree,
+                            max_degree: rel.from_heat.max_degree,
+                            heat: rel.from_heat.heat,
+                        },
+                        to_heat: NodeHeatData {
+                            address: hash_hex(&rel.to_heat.address),
+                            degree: rel.to_heat.degree,
+                            max_degree: rel.to_heat.max_degree,
+                            heat: rel.to_heat.heat,
+                        },
+                        weight: rel.weight,
                     })
                     .collect(),
             }),
@@ -812,6 +840,32 @@ mod tests {
             match dispatch_with_store(&miss, 0, &mut store) {
                 ApiResponse::Ok { data, .. } => {
                     assert!(data["edges"].as_array().unwrap().is_empty());
+                }
+                other => panic!("expected Ok, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn weighted_relations_return_graph_heat() {
+            let mut store = Store::new();
+            let a = store.insert(sample_cell("a")).unwrap();
+            let b = store.insert(sample_cell("b")).unwrap();
+            let c = store.insert(sample_cell("c")).unwrap();
+            store.link(a, b, "defines").unwrap();
+            store.link(c, b, "contradicts").unwrap();
+
+            let req = ApiRequest::new(RequestKind::WeightedRelations {
+                address: attractor_proto::ContentHashHex::new(b.to_hex()).unwrap(),
+            });
+            match dispatch_with_store(&req, 0, &mut store) {
+                ApiResponse::Ok { data, .. } => {
+                    let edges = data["edges"].as_array().expect("edges array");
+                    assert_eq!(edges.len(), 2, "full data: {data}");
+                    assert!(edges.iter().all(|edge| edge["to"] == b.to_hex()));
+                    assert!(edges.iter().all(|edge| edge["to_heat"]["degree"] == 2));
+                    assert!(edges.iter().all(|edge| edge["to_heat"]["heat"] == 1.0));
+                    assert!(edges.iter().all(|edge| edge["from_heat"]["heat"] == 0.5));
+                    assert!(edges.iter().all(|edge| edge["weight"] == 0.75));
                 }
                 other => panic!("expected Ok, got {other:?}"),
             }

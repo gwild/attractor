@@ -283,6 +283,43 @@ pub struct RelationsData {
     pub edges: Vec<LinkData>,
 }
 
+/// Connection-derived heat for one graph node.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NodeHeatData {
+    /// Node content address.
+    pub address: ContentHashHex,
+    /// Incident edge count for this node.
+    pub degree: usize,
+    /// Maximum incident edge count among all nodes in this store snapshot.
+    pub max_degree: usize,
+    /// Normalized heat in `[0.0, 1.0]`.
+    pub heat: f64,
+}
+
+/// One relation edge annotated with endpoint heat and derived edge weight.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WeightedLinkData {
+    /// Edge source address.
+    pub from: ContentHashHex,
+    /// Edge target address.
+    pub to: ContentHashHex,
+    /// Typed edge label.
+    pub kind: String,
+    /// Heat for the source node.
+    pub from_heat: NodeHeatData,
+    /// Heat for the target node.
+    pub to_heat: NodeHeatData,
+    /// Mean endpoint heat for ranking/traversal.
+    pub weight: f64,
+}
+
+/// Response payload for [`RequestKind::WeightedRelations`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WeightedRelationsData {
+    /// Incident edges (outgoing first, then incoming), with graph-derived heat.
+    pub edges: Vec<WeightedLinkData>,
+}
+
 /// Response payload for [`RequestKind::Snapshot`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SnapshotData {
@@ -333,6 +370,11 @@ pub enum RequestKind {
     /// verb a recall query walks. Returns outgoing then incoming edges.
     Relations {
         /// Node content address whose incident edges to read.
+        address: ContentHashHex,
+    },
+    /// Fetch incident edges with connection-derived endpoint heat.
+    WeightedRelations {
+        /// Node content address whose weighted incident edges to read.
         address: ContentHashHex,
     },
 }
@@ -436,6 +478,10 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&RequestKind::Snapshot).unwrap(),
             r#"{"op":"snapshot"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&RequestKind::WeightedRelations { address: hash(2) }).unwrap(),
+            r#"{"op":"weighted_relations","address":"0000000000000000000000000000000000000000000000000000000000000002"}"#
         );
     }
 
