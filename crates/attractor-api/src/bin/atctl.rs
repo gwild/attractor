@@ -10,6 +10,7 @@
 //!   atctl insert <JSON|->               # insert a Cell/Frame node (JSON arg, or - for stdin)
 //!   atctl link <FROM> <TO> <KIND>       # add a typed edge between two nodes
 //!   atctl relations <ADDR>              # read incident edges — the recall traversal
+//!   atctl weighted-relations <ADDR>     # read incident edges with graph heat
 //!   atctl --tcp 192.168.1.55:7533 ping  # remote, over TCP
 //! ```
 //! Transport defaults to the Unix socket ([`attractor_proto::SOCKET_PATH`]) on
@@ -35,6 +36,7 @@ fn usage() -> ExitCode {
          \x20 insert <JSON|->            insert a Cell/Frame node (JSON arg, or - to read stdin)\n\
          \x20 link <FROM> <TO> <KIND>    add a typed edge between two stored nodes\n\
          \x20 relations <ADDR>           read edges incident to a node (recall traversal)\n\
+         \x20 weighted-relations <ADDR>  read edges with connection-derived heat\n\
          \n\
          default transport: unix socket {SOCKET_PATH} (TCP port {TCP_PORT} for remote)"
     );
@@ -83,6 +85,10 @@ fn main() -> ExitCode {
         },
         "relations" => match parse_addr(operands, "relations <ADDR>") {
             Ok(address) => RequestKind::Relations { address },
+            Err(code) => return code,
+        },
+        "weighted-relations" => match parse_addr(operands, "weighted-relations <ADDR>") {
+            Ok(address) => RequestKind::WeightedRelations { address },
             Err(code) => return code,
         },
         "insert" => match parse_insert(operands) {

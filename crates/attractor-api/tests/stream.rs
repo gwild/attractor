@@ -149,6 +149,13 @@ mod store_over_wire {
             .expect("serialize relations")
     }
 
+    fn weighted_relations_line(address: &str) -> String {
+        serde_json::to_string(
+            &serde_json::json!({"kind": {"op": "weighted_relations", "address": address}}),
+        )
+        .expect("serialize weighted relations")
+    }
+
     #[test]
     fn convergence_holds_through_the_wire() {
         // The #2249 guarantee end-to-end over TCP: the same value inserted
@@ -218,5 +225,29 @@ mod store_over_wire {
 
         let _ = std::fs::remove_file(path);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn weighted_relations_cross_the_wire() {
+        let addr = spawn_tcp_server();
+        let a = data_of(round_trip(addr, &insert_line("edge-a", "#general")));
+        let b = data_of(round_trip(addr, &insert_line("edge-b", "#general")));
+        let c = data_of(round_trip(addr, &insert_line("edge-c", "#general")));
+        let addr_a = a["address"].as_str().expect("address").to_owned();
+        let addr_b = b["address"].as_str().expect("address").to_owned();
+        let addr_c = c["address"].as_str().expect("address").to_owned();
+        let _ = data_of(round_trip(addr, &link_line(&addr_a, &addr_b, "defines")));
+        let _ = data_of(round_trip(
+            addr,
+            &link_line(&addr_c, &addr_b, "contradicts"),
+        ));
+
+        let rel = data_of(round_trip(addr, &weighted_relations_line(&addr_b)));
+        let edges = rel["edges"].as_array().expect("edges array");
+        assert_eq!(edges.len(), 2);
+        assert!(edges.iter().all(|edge| edge["to"] == addr_b));
+        assert!(edges.iter().all(|edge| edge["to_heat"]["heat"] == 1.0));
+        assert!(edges.iter().all(|edge| edge["from_heat"]["heat"] == 0.5));
+        assert!(edges.iter().all(|edge| edge["weight"] == 0.75));
     }
 }

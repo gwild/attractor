@@ -48,6 +48,36 @@ pub enum Node {
     Frame(Frame),
 }
 
+/// Connection-derived heat for one graph node.
+///
+/// Heat is a read model, not stored mutable state: `degree / max_degree` over
+/// the current relation graph, counting incoming and outgoing edges. An
+/// isolated node has heat `0.0`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct NodeHeat {
+    /// Node address whose connection heat was measured.
+    pub address: ContentHash,
+    /// Incident edge count for this node.
+    pub degree: usize,
+    /// Maximum incident edge count among all nodes in the store.
+    pub max_degree: usize,
+    /// Normalized heat in `[0.0, 1.0]`.
+    pub heat: f64,
+}
+
+/// An incident edge plus connection-derived endpoint weights.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct WeightedRelation {
+    /// The relation edge.
+    pub edge: Edge,
+    /// Heat for the edge source node.
+    pub from_heat: NodeHeat,
+    /// Heat for the edge target node.
+    pub to_heat: NodeHeat,
+    /// Edge weight derived from its endpoint heat.
+    pub weight: f64,
+}
+
 impl Node {
     /// This node's content address — its identity in the store.
     ///
@@ -471,6 +501,97 @@ impl Store {
         edges
     }
 
+    /// Connection-derived heat for a stored node.
+    ///
+    /// Returns `None` when `addr` is not in the store. Heat is computed from
+    /// graph structure each time, so optimization consumers observe the same
+    /// tunable substrate as the relation graph without a parallel weight table.
+    #[must_use]
+    pub fn node_heat(&self, addr: &ContentHash) -> Option<NodeHeat> {
+        let idx = *self.index.get(addr)?;
+        let max_degree = self.max_degree();
+        let degree = self.degree(idx);
+        Some(NodeHeat {
+            address: *addr,
+            degree,
+            max_degree,
+            heat: normalize_heat(degree, max_degree),
+        })
+    }
+
+    /// Incident relations annotated with endpoint heat and derived edge weight.
+    ///
+    /// The edge weight is the mean of the source and target node heats. Callers
+    /// that care about direction can still read `from_heat` and `to_heat`
+    /// separately; the scalar is a stable ranking convenience for convergence
+    /// and classifier scaffolding.
+    #[must_use]
+    pub fn weighted_relations(&self, addr: &ContentHash) -> Vec<WeightedRelation> {
+        let Some(&idx) = self.index.get(addr) else {
+            return Vec::new();
+        };
+        let max_degree = self.max_degree();
+        let mut edges = Vec::new();
+        for e in self.graph.edges_directed(idx, Direction::Outgoing) {
+            let from_heat = self.heat_for_index(idx, max_degree);
+            let to_idx = e.target();
+            let to_heat = self.heat_for_index(to_idx, max_degree);
+            edges.push(WeightedRelation {
+                edge: Edge {
+                    from: *addr,
+                    to: self.graph[to_idx],
+                    kind: e.weight().clone(),
+                },
+                weight: mean_heat(&from_heat, &to_heat),
+                from_heat,
+                to_heat,
+            });
+        }
+        for e in self.graph.edges_directed(idx, Direction::Incoming) {
+            let from_idx = e.source();
+            let from_heat = self.heat_for_index(from_idx, max_degree);
+            let to_heat = self.heat_for_index(idx, max_degree);
+            edges.push(WeightedRelation {
+                edge: Edge {
+                    from: self.graph[from_idx],
+                    to: *addr,
+                    kind: e.weight().clone(),
+                },
+                weight: mean_heat(&from_heat, &to_heat),
+                from_heat,
+                to_heat,
+            });
+        }
+        edges
+    }
+
+    fn degree(&self, idx: NodeIndex) -> usize {
+        self.graph.edges_directed(idx, Direction::Incoming).count()
+            + self.graph.edges_directed(idx, Direction::Outgoing).count()
+    }
+
+    fn max_degree(&self) -> usize {
+        match self
+            .graph
+            .node_indices()
+            .map(|idx| self.degree(idx))
+            .max()
+        {
+            Some(max) => max,
+            None => 0,
+        }
+    }
+
+    fn heat_for_index(&self, idx: NodeIndex, max_degree: usize) -> NodeHeat {
+        let degree = self.degree(idx);
+        NodeHeat {
+            address: self.graph[idx],
+            degree,
+            max_degree,
+            heat: normalize_heat(degree, max_degree),
+        }
+    }
+
     /// The current chain head: the hash of the most recent entry, or `None` when
     /// empty. This single value is what to persist/compare for tamper-evidence.
     #[must_use]
@@ -626,6 +747,18 @@ impl Store {
                     })
             })
     }
+}
+
+fn normalize_heat(degree: usize, max_degree: usize) -> f64 {
+    if max_degree == 0 {
+        0.0
+    } else {
+        degree as f64 / max_degree as f64
+    }
+}
+
+fn mean_heat(from: &NodeHeat, to: &NodeHeat) -> f64 {
+    (from.heat + to.heat) / 2.0
 }
 
 fn invalid_data(e: impl fmt::Display) -> std::io::Error {
@@ -799,6 +932,28 @@ mod tests {
     fn relations_of_unknown_address_is_empty_not_error() {
         let s = Store::new();
         assert!(s.relations(&ContentHash::of(b"never stored")).is_empty());
+    }
+
+    #[test]
+    fn weighted_relations_use_connection_heat() {
+        let mut s = Store::new();
+        let a = s.insert(cell("a")).unwrap();
+        let b = s.insert(cell("b")).unwrap();
+        let c = s.insert(cell("c")).unwrap();
+        s.link(a, b, "defines").unwrap();
+        s.link(c, b, "contradicts").unwrap();
+
+        let b_heat = s.node_heat(&b).expect("stored node has heat");
+        assert_eq!(b_heat.degree, 2);
+        assert_eq!(b_heat.max_degree, 2);
+        assert_eq!(b_heat.heat, 1.0);
+
+        let weighted = s.weighted_relations(&b);
+        assert_eq!(weighted.len(), 2);
+        assert!(weighted.iter().all(|rel| rel.to_heat.address == b));
+        assert!(weighted.iter().all(|rel| rel.to_heat.heat == 1.0));
+        assert!(weighted.iter().all(|rel| rel.from_heat.heat == 0.5));
+        assert!(weighted.iter().all(|rel| rel.weight == 0.75));
     }
 
     #[test]
