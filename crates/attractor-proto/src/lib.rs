@@ -253,6 +253,9 @@ pub struct GetData {
     pub provenance_refs: Vec<ProvenanceRef>,
     /// Portable receipt for WS-3 acceptance rows (#13 contract).
     pub receipt: E2eReceipt,
+    /// Address of a persisted receipt; absent for a synthetic read receipt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receipt_address: Option<ContentHashHex>,
 }
 
 /// Response payload for [`RequestKind::Insert`].
@@ -354,6 +357,13 @@ pub enum RequestKind {
     Insert {
         /// Serialized core node (`Cell` or tagged frame object).
         node: serde_json::Value,
+    },
+    /// Attach a sourced derivation receipt to an already stored node.
+    AttachReceipt {
+        address: ContentHashHex,
+        receipt: E2eReceipt,
+        /// Exact source text whose bytes the receipt must cover.
+        source_text: String,
     },
     /// Add a typed edge between two stored nodes.
     Link {

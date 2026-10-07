@@ -20,7 +20,7 @@
 //! onto the store-backed daemon dispatch; against a daemon built without the
 //! `store` feature they return a legible "unsupported request verb" error.
 
-use attractor_proto::{ApiRequest, ContentHashHex, RequestKind, SOCKET_PATH, TCP_PORT};
+use attractor_proto::{ApiRequest, ContentHashHex, E2eReceipt, RequestKind, SOCKET_PATH, TCP_PORT};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::process::ExitCode;
 
@@ -34,6 +34,7 @@ fn usage() -> ExitCode {
          \x20 snapshot                   store integrity snapshot (store feature)\n\
          \x20 get <ADDR>                 fetch a node + provenance by content address\n\
          \x20 insert <JSON|->            insert a Cell/Frame node (JSON arg, or - to read stdin)\n\
+         \x20 attach-receipt <ADDR> <JSON|->  attach receipt + source_text envelope\n\
          \x20 link <FROM> <TO> <KIND>    add a typed edge between two stored nodes\n\
          \x20 relations <ADDR>           read edges incident to a node (recall traversal)\n\
          \x20 weighted-relations <ADDR>  read edges with connection-derived heat\n\
@@ -93,6 +94,10 @@ fn main() -> ExitCode {
         },
         "insert" => match parse_insert(operands) {
             Ok(node) => RequestKind::Insert { node },
+            Err(code) => return code,
+        },
+        "attach-receipt" => match parse_attach_receipt(operands) {
+            Ok(kind) => kind,
             Err(code) => return code,
         },
         "link" => match parse_link(operands) {
@@ -174,6 +179,47 @@ fn parse_insert(operands: &[String]) -> Result<serde_json::Value, ExitCode> {
     serde_json::from_str::<serde_json::Value>(&raw).map_err(|e| {
         eprintln!("atctl: insert node is not valid JSON: {e}");
         ExitCode::from(2)
+    })
+}
+
+fn parse_attach_receipt(operands: &[String]) -> Result<RequestKind, ExitCode> {
+    let [raw_addr, raw_receipt] = operands else {
+        eprintln!("atctl: usage: atctl attach-receipt <ADDR> <JSON|->");
+        return Err(ExitCode::from(2));
+    };
+    let address = ContentHashHex::new(raw_addr.clone()).map_err(|e| {
+        eprintln!("atctl: invalid content address {raw_addr:?}: {e}");
+        ExitCode::from(2)
+    })?;
+    let raw = if raw_receipt == "-" {
+        let mut buf = String::new();
+        std::io::stdin().read_to_string(&mut buf).map_err(|e| {
+            eprintln!("atctl: failed reading receipt JSON from stdin: {e}");
+            ExitCode::FAILURE
+        })?;
+        buf
+    } else {
+        raw_receipt.clone()
+    };
+    let mut payload: serde_json::Value = serde_json::from_str(&raw).map_err(|e| {
+        eprintln!("atctl: invalid receipt envelope JSON: {e}");
+        ExitCode::from(2)
+    })?;
+    let source_text = payload["source_text"]
+        .as_str()
+        .ok_or_else(|| {
+            eprintln!("atctl: receipt envelope needs source_text string");
+            ExitCode::from(2)
+        })?
+        .to_owned();
+    let receipt: E2eReceipt = serde_json::from_value(payload["receipt"].take()).map_err(|e| {
+        eprintln!("atctl: invalid receipt in envelope: {e}");
+        ExitCode::from(2)
+    })?;
+    Ok(RequestKind::AttachReceipt {
+        address,
+        receipt,
+        source_text,
     })
 }
 
