@@ -20,7 +20,7 @@ use std::net::{TcpListener, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 
 #[cfg(feature = "store")]
-use attractor_core::ContentHash;
+use attractor_core::{content_address, ContentHash};
 #[cfg(feature = "store")]
 use attractor_proto::{
     ContentHashHex, E2eReceipt, GetData, InsertData, LinkData, ProvenanceRef, RelationsData,
@@ -179,15 +179,25 @@ pub fn dispatch_with_store(req: &ApiRequest, uptime_secs: u64, store: &mut Store
                     Ok(node_json) => {
                         let wire_addr = hash_hex(&addr);
                         let provenance_refs = provenance_wire(store, &addr);
-                        let receipt = store.receipt(&addr).cloned().unwrap_or_else(|| {
-                            receipt_for_get(wire_addr.clone(), provenance_refs.clone())
-                        });
-                        ApiResponse::ok(GetData {
-                            address: wire_addr,
-                            node: node_json,
-                            provenance_refs,
-                            receipt,
-                        })
+                        let receipt_result = match store.receipt(&addr) {
+                            Some(item) => content_address(item)
+                                .map(|hash| (item.clone(), Some(hash_hex(&hash))))
+                                .map_err(|e| format!("receipt address failed: {e}")),
+                            None => Ok((
+                                receipt_for_get(wire_addr.clone(), provenance_refs.clone()),
+                                None,
+                            )),
+                        };
+                        match receipt_result {
+                            Ok((receipt, receipt_address)) => ApiResponse::ok(GetData {
+                                address: wire_addr,
+                                node: node_json,
+                                provenance_refs,
+                                receipt,
+                                receipt_address,
+                            }),
+                            Err(e) => ApiResponse::error(e),
+                        }
                     }
                     Err(e) => ApiResponse::error(format!("node serialization failed: {e}")),
                 },
@@ -239,7 +249,12 @@ pub fn dispatch_with_store(req: &ApiRequest, uptime_secs: u64, store: &mut Store
                     ApiResponse::error("receipt transform_id must be nonempty")
                 } else {
                     match store.attach_receipt(addr, receipt.clone()) {
-                        Ok(()) => ApiResponse::ok_empty(),
+                        Ok(()) => match content_address(receipt) {
+                            Ok(hash) => ApiResponse::ok(serde_json::json!({
+                                "receipt_address": hash_hex(&hash)
+                            })),
+                            Err(e) => ApiResponse::error(format!("receipt address failed: {e}")),
+                        },
                         Err(e) => ApiResponse::error(store_error_message(e)),
                     }
                 }
@@ -806,6 +821,7 @@ mod tests {
                         data["receipt"]["transform_id"], "attractor.store.get.v0",
                         "full data: {data}"
                     );
+                    assert!(data.get("receipt_address").is_none());
                     assert!(data["node"].is_object(), "full data: {data}");
                     assert!(data["address"].is_string(), "full data: {data}");
                 }
@@ -839,14 +855,15 @@ mod tests {
                 receipt: receipt.clone(),
                 source_text: "origin".into(),
             });
-            assert!(matches!(
-                dispatch_with_store(&request, 0, &mut store),
-                ApiResponse::Ok { .. }
-            ));
+            let attached_address = match dispatch_with_store(&request, 0, &mut store) {
+                ApiResponse::Ok { data, .. } => data["receipt_address"].clone(),
+                other => panic!("expected AttachReceipt success, got {other:?}"),
+            };
             match dispatch_with_store(&get, 0, &mut store) {
                 ApiResponse::Ok { data, .. } => {
                     assert_eq!(data["receipt"]["transform_id"], "milton.work.v1");
                     assert_eq!(data["receipt"]["source_spans"].as_array().unwrap().len(), 1);
+                    assert_eq!(data["receipt_address"], attached_address);
                 }
                 other => panic!("expected Get success, got {other:?}"),
             }
