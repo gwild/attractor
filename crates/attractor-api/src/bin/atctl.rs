@@ -33,7 +33,7 @@ fn usage() -> ExitCode {
          \x20 snapshot                   store integrity snapshot (store feature)\n\
          \x20 get <ADDR>                 fetch a node + provenance by content address\n\
          \x20 insert <JSON|->            insert a Cell/Frame node (JSON arg, or - to read stdin)\n\
-         \x20 attach-receipt <ADDR> <JSON|->  attach sourced receipt to a stored node\n\
+         \x20 attach-receipt <ADDR> <JSON|->  attach receipt + source_text envelope\n\
          \x20 link <FROM> <TO> <KIND>    add a typed edge between two stored nodes\n\
          \x20 relations <ADDR>           read edges incident to a node (recall traversal)\n\
          \n\
@@ -195,11 +195,26 @@ fn parse_attach_receipt(operands: &[String]) -> Result<RequestKind, ExitCode> {
     } else {
         raw_receipt.clone()
     };
-    let receipt: E2eReceipt = serde_json::from_str(&raw).map_err(|e| {
-        eprintln!("atctl: invalid receipt JSON: {e}");
+    let mut payload: serde_json::Value = serde_json::from_str(&raw).map_err(|e| {
+        eprintln!("atctl: invalid receipt envelope JSON: {e}");
         ExitCode::from(2)
     })?;
-    Ok(RequestKind::AttachReceipt { address, receipt })
+    let source_text = payload["source_text"]
+        .as_str()
+        .ok_or_else(|| {
+            eprintln!("atctl: receipt envelope needs source_text string");
+            ExitCode::from(2)
+        })?
+        .to_owned();
+    let receipt: E2eReceipt = serde_json::from_value(payload["receipt"].take()).map_err(|e| {
+        eprintln!("atctl: invalid receipt in envelope: {e}");
+        ExitCode::from(2)
+    })?;
+    Ok(RequestKind::AttachReceipt {
+        address,
+        receipt,
+        source_text,
+    })
 }
 
 /// Parse `link <FROM> <TO> <KIND>`, validating both addresses and a non-empty kind.

@@ -321,6 +321,8 @@ pub enum RequestKind {
     AttachReceipt {
         address: ContentHashHex,
         receipt: E2eReceipt,
+        /// Exact source text whose bytes the receipt must cover.
+        source_text: String,
     },
     /// Add a typed edge between two stored nodes.
     Link {

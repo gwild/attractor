@@ -206,18 +206,24 @@ pub fn dispatch_with_store(req: &ApiRequest, uptime_secs: u64, store: &mut Store
             },
             Err(e) => ApiResponse::error(format!("invalid node payload: {e}")),
         },
-        RequestKind::AttachReceipt { address, receipt } => match hash_core(address) {
+        RequestKind::AttachReceipt {
+            address,
+            receipt,
+            source_text,
+        } => match hash_core(address) {
             Ok(addr) => {
                 if receipt.graph_address != *address {
                     ApiResponse::error("receipt graph_address does not match address")
-                } else if receipt.source_spans.is_empty() {
-                    ApiResponse::error("receipt source_spans must be nonempty")
-                } else if receipt
-                    .source_spans
-                    .iter()
-                    .any(|span| span.start >= span.end)
+                } else if source_text.is_empty() {
+                    ApiResponse::error("receipt source_text must be nonempty")
+                } else if receipt.source_spans.len() != 1 {
+                    ApiResponse::error("receipt must have one full-source span")
+                } else if receipt.source_spans[0].source_hash.as_str()
+                    != ContentHash::of(source_text.as_bytes()).to_hex()
+                    || receipt.source_spans[0].start != 0
+                    || receipt.source_spans[0].end != source_text.len() as u64
                 {
-                    ApiResponse::error("receipt source span must have start < end")
+                    ApiResponse::error("receipt source span does not cover source_text")
                 } else if receipt.provenance_refs.is_empty() {
                     ApiResponse::error("receipt provenance_refs must be nonempty")
                 } else if receipt.provenance_refs != provenance_wire(store, &addr) {
@@ -825,12 +831,13 @@ mod tests {
             receipt.source_spans.push(SourceSpan {
                 source_hash: receipt.provenance_refs[0].content_hash.clone(),
                 start: 0,
-                end: 1,
+                end: 6,
                 label: Some("issue#4409".into()),
             });
             let request = ApiRequest::new(RequestKind::AttachReceipt {
                 address: address.clone(),
                 receipt: receipt.clone(),
+                source_text: "origin".into(),
             });
             assert!(matches!(
                 dispatch_with_store(&request, 0, &mut store),
@@ -843,10 +850,31 @@ mod tests {
                 }
                 other => panic!("expected Get success, got {other:?}"),
             }
+            let changed_bytes = ApiRequest::new(RequestKind::AttachReceipt {
+                address: address.clone(),
+                receipt: receipt.clone(),
+                source_text: "changed".into(),
+            });
+            assert!(matches!(
+                dispatch_with_store(&changed_bytes, 0, &mut store),
+                ApiResponse::Error { .. }
+            ));
+            let mut short_receipt = receipt.clone();
+            short_receipt.source_spans[0].end = 1;
+            let short_span = ApiRequest::new(RequestKind::AttachReceipt {
+                address: address.clone(),
+                receipt: short_receipt,
+                source_text: "origin".into(),
+            });
+            assert!(matches!(
+                dispatch_with_store(&short_span, 0, &mut store),
+                ApiResponse::Error { .. }
+            ));
             let wrong = ApiRequest::new(RequestKind::AttachReceipt {
                 address: attractor_proto::ContentHashHex::new(ContentHash::of(b"other").to_hex())
                     .unwrap(),
                 receipt: receipt.clone(),
+                source_text: "origin".into(),
             });
             assert!(matches!(
                 dispatch_with_store(&wrong, 0, &mut store),
@@ -856,6 +884,7 @@ mod tests {
             let empty = ApiRequest::new(RequestKind::AttachReceipt {
                 address: address.clone(),
                 receipt: receipt.clone(),
+                source_text: "origin".into(),
             });
             assert!(matches!(
                 dispatch_with_store(&empty, 0, &mut store),
@@ -870,7 +899,11 @@ mod tests {
                 end: 1,
                 label: None,
             });
-            let unrelated = ApiRequest::new(RequestKind::AttachReceipt { address, receipt });
+            let unrelated = ApiRequest::new(RequestKind::AttachReceipt {
+                address,
+                receipt,
+                source_text: "origin".into(),
+            });
             assert!(matches!(
                 dispatch_with_store(&unrelated, 0, &mut store),
                 ApiResponse::Error { .. }
