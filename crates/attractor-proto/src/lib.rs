@@ -317,6 +317,11 @@ pub enum RequestKind {
         /// Serialized core node (`Cell` or tagged frame object).
         node: serde_json::Value,
     },
+    /// Attach a sourced derivation receipt to an already stored node.
+    AttachReceipt {
+        address: ContentHashHex,
+        receipt: E2eReceipt,
+    },
     /// Add a typed edge between two stored nodes.
     Link {
         /// Edge source address.
