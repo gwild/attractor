@@ -1,110 +1,124 @@
-# Attractor
+Attractor
 
-Content-addressed matrix substrate for the Milton fleet. A field where
-information is added and convergence (the "attractor" state) is computed over
-it — the Rust core of the matrix project. Built and run in a Linux Docker on
-Homer (#2288); every agent has repo access, per-agent Docker access for
-traceability, secrets in `.env` in local clones.
+Attractor is a content-addressed evidence and verification system written in Rust. It provides a structured foundation for collecting information, preserving provenance, resolving relationships, and evaluating whether claims are supported by verifiable evidence.
 
-## What it guarantees
+Attractor treats information as a connected body of evidence rather than a collection of independent records. Content-addressed identity allows equivalent information to converge on a shared representation, while provenance preserves the distinct observations and origins behind that information.
 
-The matrix is not a bag of records — the store enforces its invariants by
-construction, not convention:
+The system is designed around explicit data contracts, deterministic transformations, verifiable receipts, and controlled state changes.
 
-1. **Content-addressed identity.** A node is keyed by the `blake3` hash of its
-   content. Inserting the same value twice — from any origin, over any
-   transport — converges to one node; identity is the hash, not insertion
-   order. Each observation is kept in a **provenance multiset** (#2249), so
-   convergence never loses *who saw it where*.
-2. **Acyclic, referentially-intact DAG.** `Store::link` refuses dangling edges
-   and any edge that would introduce a cycle.
-3. **Tamper-evident history.** Every first insertion appends a chain entry
-   committing to its predecessor's hash; `Store::verify_chain` detects
-   rewriting, reordering, truncation, or appended forgeries. Trust boundary:
-   the guarantee holds as long as the externally persisted head is honest —
-   a consistent rewrite of chain *and* head together is out of scope by design.
-4. **Typed promotion boundary.** Raw authored input (markdown) never lands in
-   the store. `attractor-projector` (WS-3) derives a typed node set and returns
-   a receipt with populated `source_spans` (#2517) — the caller inserts the
-   derived nodes, not the prose.
-5. **Fail-loud configuration.** No silent defaults anywhere (RULES.md NO
-   FALLBACKS): `attractor-config` loads typed sections from `config.yaml` and
-   required secrets from `.env`, and errors loudly when something is missing.
+Design principles
 
-## Workspace layout
+Content-addressed identity
 
-Two MSRV legs, attested separately (see below):
+Data identity is derived from content using BLAKE3 hashing. Equivalent content produces the same identity regardless of where or how it was observed.
 
-**Portable contract layer — Rust 1.92 (fleet floor), no async/web/OS deps:**
+Convergence does not discard provenance. Distinct observations remain associated with the shared identity, preserving information about their origins and the circumstances under which they were collected.
 
-- **`attractor-core`** — pure schema + content-addressing: the cell/frame data
-  model, `blake3` hashing, `serde`. Compiles identically on Linux and
-  Windows-native; this is the cross-platform-attested layer.
-- **`attractor-proto`** — wire types for the control plane (#2243 proto-split):
-  the request/response envelope both server and clients depend on. Pure
-  `serde`.
-- **`attractor-config`** — shared `config.yaml` + `.env` loader: generic typed
-  section load, required-secret access, relative-path resolution against the
-  config file's directory. Mechanism here, schema at each consumer.
-- **`attractor-api`** — control server + `atctl` client: JSON-lines
-  request/response over a Unix-domain socket (local, `serve_unix`) and TCP
-  (remote, `serve_tcp`), one line per connection; per-connection errors are
-  logged, never fatal to the accept loop. Build with the `store` feature for
-  the WS-1 matrix verbs (`Get`/`Insert`/`Link`/`Snapshot`).
-- **`attractor-io`** — Rust→Python shared-memory export (audmon `/dev/shm` +
-  control-file pattern): portable `ShmControl` contract, `cfg(unix)` mmap
-  writer.
+Structured relationships
 
-**Linux-container leg — Rust 1.96 (store semantics, `petgraph`):**
+Information can be connected through typed relationships in a directed graph.
 
-- **`attractor-store`** — the persistence layer: content-addressed node store,
-  acyclic relation graph, tamper-evident provenance chain (guarantees 1–3
-  above).
-- **`attractor-projector`** — WS-3 markdown projection boundary (guarantee 4).
-- **`attractor-wiki`** — issue-wiki local materialization, batch manifest,
-  gated publish boundary, and explicit-hash batch driver; it consumes the
-  projector, so it follows this leg.
+The store enforces referential integrity and acyclicity: relationships cannot point to nonexistent nodes or introduce cycles. References that cannot safely become graph relationships can remain recorded as unresolved or deferred evidence.
 
-## Build, test, attest
+This separates the existence of a reference from the verification and admission of the relationship it describes.
 
-All builds run in the pinned Docker sandbox (WS-5, #2288) — no host toolchain
-drift:
+Provenance and verifiable history
 
-```sh
-./docker/run.sh test -p attractor-core            # portable leg, Rust 1.92
-./docker/run.sh --store test -p attractor-store   # store leg, Rust 1.96
-./docker/attest.sh                                # full #2288 gate: both legs
-```
+Observations and transformations retain provenance. Receipts can bind derived information to source material, transformation context, and other relevant evidence.
 
-`docker/attest.sh` is the promotion gate: portable leg (core, proto, config,
-api, io) at 1.92 plus store leg (store, api+store feature, projector, wiki) at 1.96,
-emitting a `RECEIPT host=… commit=… status=PASS` line for fleet logs. The
-Milton-side hook is `milton/scripts/attractor-docker-attest.sh` (gate runs on
-Homer).
+The store maintains tamper-evident history through cryptographic hash chaining. Verification detects changes to the recorded history, including rewriting, reordering, truncation, and unauthorized additions.
 
-### Cross-platform floor (#2235)
+As with any hash-chain system, trust in the history ultimately depends on protecting or independently anchoring its externally retained chain head.
 
-`attractor-core` (and the other 1.92 crates) are verified **at the MSRV
-floor**, not above it:
+Explicit projection boundaries
 
-- Homer Linux, Rust 1.92 in the Docker sandbox (Ivy)
-- Windows native, Rust 1.92 (Windy)
+Unstructured source material is not automatically treated as trusted structured data.
 
-Both must be green before contract-layer changes merge. Verifying at the floor
-(not just pinning `rust-version`, which is informational) is what keeps
-own-code drift from passing on a newer toolchain.
+Projection converts supported source material into typed representations, retaining source references and evidence such as source hashes and spans. Subsequent resolution evaluates references and determines which relationships can be admitted.
 
-## Configuration
+This creates distinct stages for:
 
-Copy `config.example.yaml` → `config.yaml`; each crate reads its **own**
-section (api endpoints, store data dir, io shm paths). Paths are relative and
-resolved against the config file's directory, so deploys can move. Secrets go
-in `.env` only — read via `attractor-config::secret`, never committed.
+* Source acquisition
+* Structured projection
+* Evidence and provenance recording
+* Reference resolution
+* Relationship materialization
+* Verification and comparison
 
-## Design issues
+A reference extracted from a document is evidence that the reference was present; it is not, by itself, proof that the referenced object exists or that a relationship is valid.
 
-#2209 (matrix ops + API) · #2212 (convergence plan) · #2213 (crate ground
-rules + content-addressing) · #2215 (schema spec) · #2220/#2221 (redundancy
-detector + cell-store scope) · #2243 (proto split) · #2249 (provenance
-multiset) · #2288 (Docker deployment + gate) · #2517 (projection receipts /
-source spans)
+Deterministic verification
+
+Attractor provides mechanisms for comparing declared claims with recorded receipts and other evidence.
+
+Verification distinguishes between supported equality, mismatch, incomplete evidence, and cases requiring further execution or evaluation. Unknown or missing information must not silently become a successful verification result.
+
+The goal is to make verification outcomes explicit, reproducible, and inspectable rather than dependent on an agent’s interpretation or an operator’s assumptions.
+
+Controlled state changes
+
+Recording information and authorizing a state change are separate concerns.
+
+Operations that materialize or publish derived information can be bounded by explicit inputs, expected state, manifests, and receipts. This allows callers to establish what was evaluated, what was changed, and whether the resulting operation satisfied its declared constraints.
+
+Architecture
+
+Attractor is organized as a Rust workspace with components that separate the data model, storage, transformation, resolution, and interfaces.
+
+Component	Responsibility
+attractor-core	Core data model, typed structures, and content-addressed identity
+attractor-proto	Request and response types shared across interfaces
+attractor-store	Persistent graph storage, relationship integrity, and verifiable history
+attractor-projector	Transformation of supported source material into typed evidence
+attractor-resolver	Reference resolution and relationship eligibility
+attractor-assembly	Coordination of projection, resolution, and graph assembly
+attractor-api	Programmatic access to Attractor operations
+attractor-config	Typed configuration loading and explicit configuration requirements
+attractor-io	Data exchange and input/output integration
+
+Additional integration components can build on these foundations without changing the underlying identity, provenance, and verification model.
+
+Verification and trust boundaries
+
+Attractor is intended to make the basis of a verification decision inspectable.
+
+A meaningful verification result should be traceable to:
+
+* The exact source material or content identities evaluated
+* The transformation and schema used to derive structured evidence
+* The provenance associated with the evidence
+* The expected claims and the fields covered by verification
+* The actual receipts and comparison results
+* The state against which the decision was made
+
+A receipt is evidence, not an automatic guarantee of correctness. Consumers must validate the receipt, its provenance, its scope, and its relationship to the authoritative source state.
+
+Likewise, a successful API response does not necessarily establish that a substantive verification receipt exists. Callers must distinguish real, validated receipts from responses that merely describe an operation or its result.
+
+Attractor provides mechanisms for recording and checking these properties. The application consuming Attractor remains responsible for defining its authorization policies and enforcing the decisions required by its own operating environment.
+
+Intended applications
+
+The underlying model is applicable wherever information must be connected to its origins and evaluated against explicit constraints.
+
+Potential applications include:
+
+* Evidence and provenance management
+* Data integration and reconciliation
+* Document and knowledge graph construction
+* Reproducible transformation pipelines
+* Software and infrastructure verification
+* Agent activity and tool-use auditing
+* Contract and policy conformance
+* Controlled publication and data exchange
+* Long-running workflows requiring durable records
+
+These are application areas, not assumptions about a particular deployment or workflow.
+
+Design objective
+
+Attractor aims to provide a dependable substrate for systems that need to establish not only what information they contain, but where it came from, how it was transformed, which relationships have been validated, and why a particular decision can be trusted.
+
+Its central distinction is between information, evidence, verification, and authorization. They are related, but they are not interchangeable.
+
+The result is a system in which convergence does not erase provenance, references do not automatically become facts, unknown evidence does not become success, and recorded state changes can be independently examined.
