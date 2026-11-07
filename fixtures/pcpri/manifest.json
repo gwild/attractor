@@ -5,7 +5,7 @@
     "name": "PCPRI (Phase-Coherent Pseudorandom Recursive Input)",
     "source_repo": "gwild/pcpri",
     "source_commit": "2d622104f4543bcac7530b61b683ac70dfafb9d3",
-    "implementation": "line-for-line Rust port of the pcpri generator core (state, branch operators, conductor, phase analyzer, feedback extraction), as merged into gwild/data_walker (PR #1, data_walker_rs/src/converters/math/pcpri.rs)",
+    "implementation": "line-for-line Rust port of the pcpri generator core (state, branch operators, conductor, phase analyzer, feedback extraction), as ported into gwild/data_walker in PR #1 at commit 61953b3077cdf430eb0b0e03e87765f2db3980b6 (under review, not merged as of 2026-11-07; data_walker_rs/src/converters/math/pcpri.rs)",
     "fidelity": "port verified step-identical against the original crate: conductor value, feedback word, branch choice, and packed state bytes matched on every one of 3,600 steps across 3 configurations"
   },
   "config": {
